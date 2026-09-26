@@ -1,0 +1,9 @@
+/build/
+/.tools/
+/third_party/
+/out/
+/.vs/
+/CMakeUserPresets.json
+/imgui.ini
+/wave_layout.ini
+*.user
