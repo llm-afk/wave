@@ -91,7 +91,7 @@ void summaries_after_many_wraps() {
     const auto discontinuous = store.query(0, 0, 100, 3);
     require(store.range().first_frame == 30007 &&
             std::any_of(discontinuous.begin(), discontinuous.end(), [](const auto& p) { return p.value == 55; }),
-            "A discontinuity must reset stale summary history");
+            "A gap larger than capacity must expire old history");
 }
 
 void invalid_input_is_atomic() {
@@ -125,8 +125,8 @@ void randomized_summary_reference() {
     std::uint64_t next = 13;
     for (std::size_t iteration = 0; iteration < 80; ++iteration) {
         if (iteration == 37) {
-            next += 91; // A new segment begins within summary blocks.
-            reference.clear();
+            next += 91; // Missing slots remain explicit within summary blocks.
+            reference.insert(reference.end(), 91 * channels, std::numeric_limits<float>::quiet_NaN());
         }
         const auto count = 17 + random() % 1700;
         std::vector<float> batch(count * channels);
@@ -146,18 +146,21 @@ void randomized_summary_reference() {
                 const auto points = store.query(channel, (reference_first + left) / rate,
                                                  (reference_first + right - 1) / rate, width);
                 const auto size = right - left;
-                require(!points.empty() && points.size() <= 4 * width,
+                require(!points.empty() && points.size() <= 4 * width + 3,
                         "Random range query must produce a bounded nonempty result");
                 for (std::size_t i = 0; i < points.size(); ++i) {
                     const auto index = static_cast<std::uint64_t>(std::llround(points[i].t * rate));
                     require(index >= reference_first + left && index < reference_first + right,
                             "Random query cannot leak samples outside the requested range");
-                    require(points[i].value == reference[(index - reference_first) * channels + channel],
+                    const float expected = reference[(index - reference_first) * channels + channel];
+                    require(points[i].value == expected || (std::isnan(points[i].value) && std::isnan(expected)),
                             "Random query must match raw history at every returned timestamp");
                     if (i) require(points[i - 1].t < points[i].t, "Random output must be strictly ordered");
                 }
                 if (size <= width * 4) {
-                    require(points.size() == size, "A narrow view must return every original sample");
+                    std::size_t valid=0;
+                    for(auto i=left;i<right;++i) if(std::isfinite(reference[i*channels+channel])) ++valid;
+                    require(points.size() == valid, "A narrow view must return all real samples and omit missing slots");
                     continue;
                 }
                 // Independent raw-array oracle checks the important property:
@@ -165,13 +168,16 @@ void randomized_summary_reference() {
                 for (std::size_t bin = 0; bin < width; ++bin) {
                     const auto lo = left + size * bin / width;
                     const auto hi = left + size * (bin + 1) / width;
-                    float minimum = reference[lo * channels + channel];
-                    float maximum = minimum;
+                    float minimum = std::numeric_limits<float>::infinity();
+                    float maximum = -minimum;
                     for (auto i = lo; i < hi; ++i) {
+                        if (!std::isfinite(reference[i * channels + channel])) continue;
                         minimum = std::min(minimum, reference[i * channels + channel]);
                         maximum = std::max(maximum, reference[i * channels + channel]);
                     }
-                    bool found_min = false, found_max = false, found_first = false, found_last = false;
+                    bool found_min = !std::isfinite(minimum), found_max = !std::isfinite(maximum),
+                         found_first = !std::isfinite(reference[lo*channels+channel]),
+                         found_last = !std::isfinite(reference[(hi-1)*channels+channel]);
                     for (const auto& point : points) {
                         const auto index = static_cast<std::uint64_t>(std::llround(point.t * rate));
                         if (index >= reference_first + lo && index < reference_first + hi) {
@@ -263,6 +269,40 @@ void source_lifecycle_and_concurrent_queries() {
 
 int main() {
     try {
+        {
+            wave::DataStore gaps(1000, .128, {{"A", "V"}});
+            gaps.append(0, std::vector<float>(40, 2));
+            gaps.append(42, std::vector<float>(40, 7));
+            require(gaps.range().first_frame == 0 && gaps.range().last_frame == 81,
+                    "Small missing batch must not clear existing data");
+            for (auto width : {1u, 1000u}) {
+                const auto points = gaps.query(0, 0, 1, width);
+                bool before=false, hole=false, after=false;
+                for (const auto& p:points) {
+                    if (p.t < .04 && p.value==2) before=true;
+                    if (std::isnan(p.value)) hole=true;
+                    if (p.t >= .042 && p.value==7) after=true;
+                }
+                require(before && !hole && after, "Raw and reduced queries must connect real data across missing slots");
+                bool connected=false;
+                for(std::size_t i=1;i<points.size();++i)
+                    if(std::abs(points[i-1].t-.039)<1e-12 && std::abs(points[i].t-.042)<1e-12)
+                        connected=true;
+                require(connected, "Gap endpoints must be adjacent for direct rendering");
+            }
+            const auto frozen=gaps.snapshot(0,1);
+            gaps.set_capacity_frames(64);
+            require(gaps.range().first_frame==18, "Resize must retain the latest timeline slots");
+            const auto resized=gaps.query(0,0,1,1);
+            require(std::all_of(resized.begin(),resized.end(),[](auto p){return std::isfinite(p.value);}) && resized.front().value==2 && resized.back().value==7,
+                    "Resize must keep both sides connected without missing samples");
+            gaps.append(82,std::vector<float>(200,9));
+            require(gaps.query(0,0,1,1).size()<=4, "Evicted gaps must not leak into new queries");
+            const auto old=frozen.query(0,0,1,1);
+            require(std::all_of(old.begin(),old.end(),[](auto p){return std::isfinite(p.value);}) && old.front().value==2 && old.back().value==7,
+                    "Frozen real history must stay connected after live rollover");
+            std::cout << "PASS gaps retain history, connect across missing slots, survive resize/freeze and expire on rollover\n";
+        }
         {
             wave::DataStore timed(1, 32, {});
             timed.configure(0, {{"Value", "", "value"}}, true);

@@ -30,7 +30,7 @@ The producer reconnects automatically in unlimited mode. Samples while
 disconnected are not recorded. A reconnect resumes after the receiver's last
 index; downtime is omitted from this demo's X timeline. Sampling uses nominal
 5 Hz slots, not hardware timestamps. Late slots are skipped, never filled with
-invented readings; DataStore starts a new contiguous segment after a gap.
+invented readings; DataStore retains history within capacity and connects real samples across gaps.
 
 ## Protocol
 

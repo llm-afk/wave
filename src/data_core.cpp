@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <numbers>
@@ -39,6 +40,7 @@ struct SampleStorage {
     std::uint64_t first_frame{};
     std::uint64_t next_frame{};
     std::size_t count{};
+    std::deque<std::pair<std::uint64_t, std::uint64_t>> gaps;
 
     SampleStorage(double rate, std::size_t frame_capacity,
                   std::vector<ChannelInfo> metadata, bool received = false)
@@ -72,16 +74,26 @@ struct SampleStorage {
         const auto channel_count = channels.size();
         const auto frame_count = input.size() / channel_count;
         if (!frame_count) return;
-        // A gap is visible as a new range rather than a fabricated connected
-        // line across missing samples. Partial summary blocks are reinitialized.
+        // Missing uniform slots consume timeline capacity but never erase retained history.
+        // NaNs mark absent slots internally; queries omit them and connect real samples.
+        if (!reception_time && count && start > next_frame && start - next_frame < capacity) {
+            std::vector<float> missing((start - next_frame) * channel_count,
+                                       std::numeric_limits<float>::quiet_NaN());
+            append(next_frame, missing);
+        }
         const bool discontinuity = !count || start != next_frame;
         if (discontinuity) {
             count = 0;
+            gaps.clear();
             first_frame = start;
             next_frame = start;
         }
         for (std::size_t offset = 0; offset < frame_count; ++offset) {
             const auto frame = start + offset;
+            if (!std::isfinite(input[offset * channel_count])) {
+                if (!gaps.empty() && gaps.back().second == frame) gaps.back().second = frame + 1;
+                else gaps.emplace_back(frame, frame + 1);
+            }
             const auto slot = (frame % capacity) * channel_count;
             if (reception_time) times[frame % capacity] = timestamps[offset];
             std::copy_n(input.begin() + offset * channel_count, channel_count, values.begin() + slot);
@@ -94,11 +106,11 @@ struct SampleStorage {
                     if (reset) {
                         summary = {sample, sample, frame, frame};
                     } else {
-                        if (sample < summary.min_value) {
+                        if (std::isfinite(sample) && (!std::isfinite(summary.min_value) || sample < summary.min_value)) {
                             summary.min_value = sample;
                             summary.min_frame = frame;
                         }
-                        if (sample > summary.max_value) {
+                        if (std::isfinite(sample) && (!std::isfinite(summary.max_value) || sample > summary.max_value)) {
                             summary.max_value = sample;
                             summary.max_frame = frame;
                         }
@@ -110,6 +122,8 @@ struct SampleStorage {
         count = static_cast<std::size_t>(std::min<std::uint64_t>(
             capacity, next_frame - first_frame));
         first_frame = next_frame - count;
+        while (!gaps.empty() && gaps.front().second <= first_frame) gaps.pop_front();
+        if (!gaps.empty()) gaps.front().first = std::max(gaps.front().first, first_frame);
     }
 
     std::pair<std::uint64_t, std::uint64_t> interval(double tmin, double tmax) const {
@@ -155,11 +169,11 @@ struct SampleStorage {
         const auto initial = value(first, channel);
         Extremes result{initial, initial, first, first};
         const auto include = [&result](const Extremes& item) {
-            if (item.min_value < result.min_value) {
+            if (std::isfinite(item.min_value) && (!std::isfinite(result.min_value) || item.min_value < result.min_value)) {
                 result.min_value = item.min_value;
                 result.min_frame = item.min_frame;
             }
-            if (item.max_value > result.max_value) {
+            if (std::isfinite(item.max_value) && (!std::isfinite(result.max_value) || item.max_value > result.max_value)) {
                 result.max_value = item.max_value;
                 result.max_frame = item.max_frame;
             }
@@ -194,7 +208,8 @@ struct SampleStorage {
         const auto pixels = std::clamp(pixel_width, std::size_t{1}, n);
         std::vector<PlotPoint> result;
         const auto push = [&](std::uint64_t frame) {
-            result.push_back({time(frame), value(frame, channel)});
+            const auto sample = value(frame, channel);
+            if (std::isfinite(sample)) result.push_back({time(frame), sample});
         };
         if ((n + 3) / 4 <= pixels) {
             result.reserve(n);
@@ -212,6 +227,18 @@ struct SampleStorage {
             std::sort(indices.begin(), indices.end());
             const auto unique_end = std::unique(indices.begin(), indices.end());
             for (auto it = indices.begin(); it != unique_end; ++it) push(*it);
+        }
+        // Keep the real endpoints on either side of a gap even after decimation.
+        // Missing slots are omitted, so renderers connect across the gap.
+        for (const auto& [lo, hi] : gaps) {
+            if (hi <= first) continue;
+            if (lo >= end) break;
+            if (lo > first) push(lo - 1);
+            if (hi < end) push(hi);
+        }
+        if (!gaps.empty()) {
+            std::sort(result.begin(), result.end(), [](auto a, auto b){return a.t < b.t;});
+            result.erase(std::unique(result.begin(), result.end(), [](auto a, auto b){return a.t == b.t;}), result.end());
         }
         return result;
     }
@@ -319,6 +346,7 @@ void DataStore::set_capacity_frames(std::size_t frames) {
     current.values.swap(replacement.values);
     current.times.swap(replacement.times);
     current.summaries.swap(replacement.summaries);
+    current.gaps.swap(replacement.gaps);
     current.first_frame = replacement.first_frame;
     current.next_frame = replacement.next_frame;
     current.count = replacement.count;
@@ -347,6 +375,7 @@ void DataStore::append(std::uint64_t first_frame, std::span<const float> values)
 void DataStore::clear() {
     const std::lock_guard lock(impl_->mutex);
     impl_->storage.count = 0;
+    impl_->storage.gaps.clear();
     impl_->storage.first_frame = impl_->storage.next_frame = 0;
     std::fill(impl_->cleared.begin(), impl_->cleared.end(), 0);
 }

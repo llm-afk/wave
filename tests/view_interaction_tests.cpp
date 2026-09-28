@@ -79,6 +79,7 @@ public:
         for (int i = 0; i < 8; ++i) frame();
     }
 
+    wave::DataStore& test_store() { return store; }
     ~Fixture() {
         view.reset();
         ImPlot::DestroyContext();
@@ -1380,8 +1381,8 @@ void narrow_overview_keeps_true_scale_and_remains_draggable() {
 void overview_tracks_selected_channels() {
     Fixture f({{"Sine", "V"}, {"Second", "A"}});
     f.toggle_overview();
-    const ImVec4 first{0.94f, 0.20f, 0.18f, 0.55f};
-    const ImVec4 second{0.25f, 0.65f, 0.98f, 0.55f};
+    const ImVec4 first{0.94f, 0.20f, 0.18f, 0.95f};
+    const ImVec4 second{0.25f, 0.65f, 0.98f, 0.95f};
     require(f.overview_has_color(first) && !f.overview_has_color(second),
             "Overview must initially render only the selected channel");
     f.toggle_channel(1);
@@ -1567,6 +1568,20 @@ void held_space_toggles_freeze_only_once() {
 } // namespace
 
 int main() {
+    {
+        Fixture f;
+        f.toggle_overview();
+        const auto before=f.test_store().range();
+        f.test_store().append(before.last_frame+4, std::vector<float>(100, .5f));
+        for(int i=0;i<12;++i) f.frame();
+        require(f.test_store().range().first_frame==before.first_frame, "Missing frames must preserve view history");
+        require(std::isfinite(f.state().y.Min) && std::isfinite(f.state().y.Max), "Gap must not poison Y fit");
+        const auto* data=ImGui::GetDrawData();
+        for(int i=0;i<data->CmdListsCount;++i)
+            for(const auto& v:data->CmdLists[i]->VtxBuffer)
+                require(std::isfinite(v.pos.x) && std::isfinite(v.pos.y), "Main plot and Zoom must not emit NaN geometry");
+        std::cout << "PASS retained gap history with finite main plot, Y fit and overview rendering\n";
+    }
     try {
         {
             wave::SignalHub hub;

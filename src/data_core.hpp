@@ -78,12 +78,12 @@ public:
     std::unique_ptr<DataStore> resized_copy(std::size_t frames) const;
     DataRange range() const;
 
-    // A discontinuity in first_frame starts a new contiguous segment. Producers
+    // Forward gaps retain history while omitting missing samples within timeline capacity. Producers
     // must supply finite values; invalid batches are rejected before mutation.
     void append(std::uint64_t first_frame, std::span<const float> interleaved);
     void clear();
 
-    // Returns at most 4 * max(1, pixel_width) points, retaining the first, last,
+    // Returns up to 4 * max(1, pixel_width) points plus 2 per retained gap, keeping first, last,
     // minimum and maximum of each bin in original time order. Small views
     // return original samples. Out-of-history requests return only available
     // data (or empty); range() reports the actual retained interval.

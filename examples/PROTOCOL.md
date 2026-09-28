@@ -31,7 +31,8 @@ sample index. No batch is automatically replayed after an uncertain connection
 failure: reconnect/register and use the returned index. Reconnecting after Wave
 restarts creates a fresh session with index zero. In uniform mode disconnect downtime is not
 represented unless the producer advances its sequence explicitly; a sequence gap
-starts a fresh contiguous buffer segment in the current DataStore.
+retains history within timeline capacity and connects the real samples across missing slots.
+Missing slots consume capacity, are never zero-filled and are not counted as received samples.
 
 ## Framing
 

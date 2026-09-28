@@ -424,6 +424,7 @@ private:
         for(std::size_t i=0;i<panel.selected.size();++i) if(included(i)) {
             for(const auto& p:visible_points(panel,i,next.min,next.max,
                     static_cast<std::size_t>(std::max(1.0f,panel.plot_size.x)))) {
+                if(!std::isfinite(p.value)) continue;
                 if(!have) {low=high=p.value; have=true;}
                 low=std::min(low,p.value); high=std::max(high,p.value);
             }
@@ -673,6 +674,7 @@ private:
                         auto& points = series[channel];
                         points = visible_points(panel, channel, extent.min, extent.max, width);
                         for (const auto& point : points) {
+                            if (!std::isfinite(point.value)) continue;
                             if (!have_points) { low = high = point.value; have_points = true; }
                             low = std::min(low, point.value);
                             high = std::max(high, point.value);
@@ -689,7 +691,7 @@ private:
                         for (const auto& point : points) preview.push_back({to_pixel(point.t),
                             graph_pos.y + graph_size.y * static_cast<float>(0.5 - (point.value - middle) / y_span)});
                         auto color = signal_colors[channel % signal_colors.size()];
-                        color.w = 0.55f;
+                        color.w = 0.95f;
                         if (points.size() > static_cast<std::size_t>(graph_size.x * 2)) {
                             // Dense previews show a per-pixel min/max envelope instead
                             // of connecting aliased oscillations across the whole cache.
@@ -701,6 +703,7 @@ private:
                                 draw->AddLine({x, top}, {x, std::max(top + scale, bottom)}, ImGui::GetColorU32(color), scale);
                             };
                             for (const auto& point : preview) {
+                                if (!std::isfinite(point.y)) { flush(); column = -1; continue; }
                                 const int next = std::clamp(static_cast<int>(point.x - graph_pos.x), 0,
                                     std::max(0, static_cast<int>(graph_size.x) - 1));
                                 if (next != column) { flush(); column = next; top = bottom = point.y; }
@@ -708,14 +711,22 @@ private:
                             }
                             flush();
                         } else {
-                            draw->AddPolyline(preview.data(), static_cast<int>(preview.size()), ImGui::GetColorU32(color), ImDrawFlags_None, scale);
+                            std::size_t begin = 0;
+                            while (begin < preview.size()) {
+                                while (begin < preview.size() && !std::isfinite(preview[begin].y)) ++begin;
+                                auto end = begin;
+                                while (end < preview.size() && std::isfinite(preview[end].y)) ++end;
+                                if (end - begin >= 2) draw->AddPolyline(preview.data() + begin, static_cast<int>(end - begin), ImGui::GetColorU32(color), ImDrawFlags_None, scale);
+                                else if (end > begin) draw->AddCircleFilled(preview[begin], scale * 0.7f, ImGui::GetColorU32(color));
+                                begin = end;
+                            }
                         }
                         points_this_frame_ += points.size();
                     }
                     edges = selection_pixels();
                     // Dim only the context; keep the actual viewport a fine outline.
-                    draw->AddRectFilled(graph_pos, {edges.x, graph_end.y}, IM_COL32(0, 0, 0, 95));
-                    draw->AddRectFilled({edges.y, graph_pos.y}, graph_end, IM_COL32(0, 0, 0, 95));
+                    draw->AddRectFilled(graph_pos, {edges.x, graph_end.y}, IM_COL32(0, 0, 0, 40));
+                    draw->AddRectFilled({edges.y, graph_pos.y}, graph_end, IM_COL32(0, 0, 0, 40));
                     if (edges.y - edges.x >= scale) {
                         draw->AddRect({edges.x, graph_pos.y + scale}, {edges.y, graph_end.y - scale},
                             IM_COL32(151, 184, 206, 220), 0, ImDrawFlags_None, scale);
@@ -736,11 +747,11 @@ private:
                     panel.overview_drag = {};
                     draw->AddText({graph_pos.x + 4 * scale, graph_pos.y + 4 * scale}, IM_COL32(100, 100, 100, 255), "暂无数据");
                 }
-                ImGui::TextDisabled("%.3f s", range.empty ? 0.0 : range.begin);
+                ImGui::Text("%.3f s", range.empty ? 0.0 : range.begin);
                 char end_label[48];
                 ImFormatString(end_label, IM_ARRAYSIZE(end_label), "%.3f s", range.empty ? 0.0 : range.end);
                 ImGui::SameLine(std::max(0.0f, panel.overview_size.x - 6 * scale - ImGui::CalcTextSize(end_label).x));
-                ImGui::TextDisabled("%s", end_label);
+                ImGui::Text("%s", end_label);
                 const auto right_drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 0);
                 if (ImGui::IsWindowHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
                     right_drag.x * right_drag.x + right_drag.y * right_drag.y < 9 * scale * scale)
@@ -807,7 +818,24 @@ private:
                 spec.Stride = sizeof(PlotPoint);
                 const std::string label = store_.label(i)
                     + "###channel" + std::to_string(i);
-                ImPlot::PlotLine(label.c_str(), &points[0].t, &points[0].value, static_cast<int>(points.size()), spec);
+                // Submit finite runs separately: ImPlot's SkipNaN flag connects
+                // across holes, while the default renderer may emit NaN vertices.
+                std::size_t begin=0;
+                bool submitted=false;
+                while(begin<points.size()) {
+                    while(begin<points.size() && !std::isfinite(points[begin].value)) ++begin;
+                    auto end=begin;
+                    while(end<points.size() && std::isfinite(points[end].value)) ++end;
+                    if(end>begin) {
+                        auto segment_spec=spec;
+                        if(end-begin==1) segment_spec.Marker=ImPlotMarker_Circle;
+                        ImPlot::PlotLine(label.c_str(), &points[begin].t, &points[begin].value,
+                                         static_cast<int>(end-begin), segment_spec);
+                        submitted=true;
+                    }
+                    begin=end;
+                }
+                if(!submitted) ImPlot::PlotLine(label.c_str(), &points[0].t, &points[0].value, 0, spec);
                 if (const auto* item=ImPlot::GetItem(label.c_str())) panel.legend_hidden[i]=!item->Show;
                 any_points = true;
                 points_this_frame_ += points.size();

@@ -27,8 +27,8 @@ capped at 4096 frames and the protocol payload limit. Partial batches flush afte
 200 ms. Capture drains on its own thread; TCP waits do not block WASAPI reads.
 The bounded queue retains up to two seconds. Overflow drops oldest pending frames
 and reports the count. Device positions preserve sequence gaps, so the current
-Wave data store starts a new contiguous segment on a gap (it does not stitch over
-missing audio). Reconnect discards pending old samples and resumes from Wave's
+Wave data store retains history within timeline capacity and connects real samples across
+missing audio. Reconnect discards pending old samples and resumes from Wave's
 acknowledged index. This is live visualization, not a lossless audio recorder.
 
 Wave's initial buffer holds 100,000 points/channel: about 2.08 seconds at 48 kHz.
