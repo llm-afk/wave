@@ -3,6 +3,7 @@
 #include <memory>
 
 namespace wave {
+class SignalHub;
 
 // Call once after creating the ImGui and ImPlot contexts.
 void apply_style(float dpi_scale = 1.0f);
@@ -11,11 +12,13 @@ void apply_style(float dpi_scale = 1.0f);
 // and a DataStore that must outlive this view. draw() is UI-thread only.
 class WaveView {
 public:
-    explicit WaveView(DataStore& store);
+    explicit WaveView(DataStore& store, double initial_span = 0.2);
+    explicit WaveView(SignalHub& store, double initial_span = 0.2);
     ~WaveView();
     WaveView(const WaveView&) = delete;
     WaveView& operator=(const WaveView&) = delete;
     void draw();
+    void set_source_connected(bool connected);
     std::size_t points_this_frame() const;
 private:
     struct Impl;

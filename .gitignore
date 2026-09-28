@@ -7,3 +7,5 @@
 /imgui.ini
 /wave_layout.ini
 *.user
+__pycache__/
+*.pyc

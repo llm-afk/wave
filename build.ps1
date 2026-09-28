@@ -108,10 +108,16 @@ try {
             (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
             (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
         )
-        Link-Executable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('-mwindows', '-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32')
+        Link-Executable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('-mwindows', '-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32', '-lws2_32')
+        Link-Executable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-Object 'examples/system_source.cpp')) @('-lws2_32')
+        Link-Executable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-Object 'examples/audio_source.cpp')) @('-lws2_32', '-lole32', '-luuid')
     }
 
     if (-not $SkipTests) {
+        $tcpTest = Join-Path $buildDirectory 'tcp_source_tests.exe'
+        Link-Executable $tcpTest @($coreObject, (Build-Object 'tests/tcp_source_tests.cpp')) @('-lws2_32')
+        & $tcpTest
+        if ($LASTEXITCODE -ne 0) { throw 'TCP source tests failed.' }
         $testObjects = @($coreObject, (Build-Object 'tests/data_core_tests.cpp'))
         $testExecutable = Join-Path $buildDirectory 'data_core_tests.exe'
         Link-Executable $testExecutable $testObjects @()

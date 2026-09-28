@@ -189,11 +189,51 @@ void randomized_summary_reference() {
     }
 }
 
+void resize_retains_latest_and_snapshot() {
+    wave::DataStore store(1000, 0.064, {{"A", "V"}, {"B", "A"}});
+    std::vector<float> data;
+    for (int i = 0; i < 157; ++i) { data.push_back(float(i)); data.push_back(float(-i)); }
+    store.append(0, data);
+    const auto frozen = store.snapshot(0, 1);
+    const auto* metadata = &store.channels();
+    store.set_capacity_frames(32);
+    require(store.capacity_frames() == 32 && store.range().first_frame == 125,
+            "Shrink must retain the latest complete frames after wraparound");
+    for (std::size_t channel = 0; channel < 2; ++channel) {
+        const auto points = store.query(channel, 0, 1, 100);
+        require(points.size() == 32, "Both channels must have the resized capacity");
+        for (std::size_t i = 0; i < points.size(); ++i)
+            require(points[i].value == (channel ? -1 : 1) * float(125 + i),
+                    "Resize must preserve sample order and channel alignment");
+        const auto summary = store.query(channel, 0, 1, 1);
+        require(summary.front().t == points.front().t && summary.back().t == points.back().t,
+                "Rebuilt summaries must retain endpoints");
+    }
+    store.set_capacity_frames(128);
+    require(store.range().frame_count == 32 && store.range().first_frame == 125,
+            "Growing must preserve available history without inventing samples");
+    store.append(157, std::vector<float>{157, -157, 158, -158});
+    require(store.range().last_frame == 158 && store.range().frame_count == 34,
+            "Append must continue the timeline after resizing");
+    require(&store.channels() == metadata && frozen.range().frame_count == 64 &&
+            frozen.query(0, 0, 1, 100).front().value == 93,
+            "Metadata and frozen snapshots must remain stable");
+    bool rejected = false;
+    try { store.set_capacity_frames(0); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && store.capacity_frames() == 128 && store.range().frame_count == 34,
+            "Invalid resize must leave the buffer intact");
+    store.clear();
+    store.set_capacity_frames(16);
+    require(store.range().empty, "Resizing an empty buffer must keep it empty");
+}
+
 void source_lifecycle_and_concurrent_queries() {
     wave::DataStore store(20000, 0.2);
     wave::SimulationSource source(store);
     source.start();
     source.start(); // Idempotent: must not spawn a second producer.
+    store.set_capacity_frames(3000);
+    store.set_capacity_frames(5000);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (source.stats().produced_frames < 2000 && std::chrono::steady_clock::now() < deadline) {
         const auto range = store.range();
@@ -223,11 +263,39 @@ void source_lifecycle_and_concurrent_queries() {
 
 int main() {
     try {
+        {
+            wave::DataStore timed(1, 32, {});
+            timed.configure(0, {{"Value", "", "value"}}, true);
+            for (std::uint64_t i=0;i<80;++i) {
+                const float value=float(i);
+                timed.append_received(i, std::span<const float>(&value,1), double(i*i)/1000);
+            }
+            const auto range=timed.range();
+            require(range.first_frame==48 && range.begin==2.304 && range.end==6.241, "Irregular ring must retain actual times");
+            auto snapshot=timed.snapshot(0,10);
+            const auto points=timed.query(0,3.0,4.0,100);
+            require(points.size()==9 && points.front().t==3.025 && points.back().t==3.969, "Irregular queries must binary-search actual times");
+            const auto reduced=timed.query(0,0,10,1);
+            require(reduced.front().value==48 && reduced.back().value==79, "Irregular summaries must preserve extrema");
+            timed.set_capacity_frames(8);
+            require(timed.range().begin==5.184 && timed.query(0,0,10,100).size()==8, "Resize must preserve timestamps");
+            timed.clear_channel(0);
+            require(timed.query(0,0,10,100).empty() && snapshot.query(0,0,10,100).size()==32, "Clear must use indices; snapshot remains immutable");
+            require(snapshot.query(0,0,10,100,timed.channel_first_frame(0)).empty(), "Live clear cutoff must also filter frozen history");
+            const float value=80;
+            timed.append_received(80,std::span<const float>(&value,1),7.123);
+            require(timed.query(0,0,10,100).front().t==7.123, "New point must survive channel clear");
+            bool rejected=false;
+            try {timed.append_received(81,std::span<const float>(&value,1),7.0);} catch(const std::invalid_argument&) {rejected=true;}
+            require(rejected && timed.range().last_frame==80, "Backwards timestamp must be rejected atomically");
+            std::cout << "PASS receiver timestamps: irregular query, rollover, summary, resize, clear and snapshot\n";
+        }
         rollover_and_snapshot();
         extrema_and_ordering();
         summaries_after_many_wraps();
         invalid_input_is_atomic();
         randomized_summary_reference();
+        resize_retains_latest_and_snapshot();
         source_lifecycle_and_concurrent_queries();
         std::cout << "PASS: rollover, immutable pause, peak preservation, summary wrap, validation, source lifecycle\n";
         return 0;

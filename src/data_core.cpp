@@ -33,15 +33,17 @@ struct SampleStorage {
     std::size_t capacity;
     std::vector<ChannelInfo> channels;
     std::vector<float> values;
+    bool reception_time;
+    std::vector<double> times;
     std::vector<SummaryLevel> summaries;
     std::uint64_t first_frame{};
     std::uint64_t next_frame{};
     std::size_t count{};
 
     SampleStorage(double rate, std::size_t frame_capacity,
-                  std::vector<ChannelInfo> metadata)
+                  std::vector<ChannelInfo> metadata, bool received = false)
         : sample_rate(rate), capacity(frame_capacity), channels(std::move(metadata)),
-          values(capacity * channels.size()) {
+          values(capacity * channels.size()), reception_time(received), times(received ? capacity : 0) {
         // Fixed absolute-frame blocks form a small extrema pyramid. Queries
         // combine summaries, never scan/copy the entire retained history.
         for (std::size_t block = 16; block <= capacity;) {
@@ -57,14 +59,16 @@ struct SampleStorage {
         return values[(frame % capacity) * channels.size() + channel];
     }
 
+    double time(std::uint64_t frame) const {
+        return reception_time ? times[frame % capacity] : static_cast<double>(frame) / sample_rate;
+    }
     DataRange range() const {
         if (!count) return {};
-        return {false, static_cast<double>(first_frame) / sample_rate,
-                static_cast<double>(next_frame - 1) / sample_rate,
+        return {false, time(first_frame), time(next_frame - 1),
                 first_frame, next_frame - 1, count};
     }
 
-    void append(std::uint64_t start, std::span<const float> input) {
+    void append(std::uint64_t start, std::span<const float> input, std::span<const double> timestamps = {}) {
         const auto channel_count = channels.size();
         const auto frame_count = input.size() / channel_count;
         if (!frame_count) return;
@@ -79,6 +83,7 @@ struct SampleStorage {
         for (std::size_t offset = 0; offset < frame_count; ++offset) {
             const auto frame = start + offset;
             const auto slot = (frame % capacity) * channel_count;
+            if (reception_time) times[frame % capacity] = timestamps[offset];
             std::copy_n(input.begin() + offset * channel_count, channel_count, values.begin() + slot);
             for (auto& level : summaries) {
                 const auto summary_slot = ((frame / level.block_size) % level.block_count) * channel_count;
@@ -114,6 +119,19 @@ struct SampleStorage {
         if (tmax < available.begin || tmin > available.end) return {0, 0};
         std::uint64_t first = first_frame;
         std::uint64_t end = next_frame;
+        if (reception_time) {
+            auto bound = [&](double t, bool upper) {
+                auto lo = first_frame, hi = next_frame;
+                while (lo < hi) {
+                    const auto mid = lo + (hi - lo) / 2;
+                    if (time(mid) < t || (upper && time(mid) == t)) lo = mid + 1;
+                    else hi = mid;
+                }
+                return lo;
+            };
+            first = bound(tmin, false); end = bound(tmax, true);
+            return {first, end};
+        }
         // Accommodate round-off when a timestamp returned by range/query is
         // passed back into this API. This tolerance is far below one sample.
         const auto tolerance = [](long double x) {
@@ -167,15 +185,16 @@ struct SampleStorage {
     }
 
     std::vector<PlotPoint> query(std::size_t channel, double tmin, double tmax,
-                                  std::size_t pixel_width) const {
+                                  std::size_t pixel_width, std::uint64_t cutoff = 0) const {
         if (channel >= channels.size()) throw std::out_of_range("Invalid channel index");
-        const auto [first, end] = interval(tmin, tmax);
-        if (first == end) return {};
+        auto [first, end] = interval(tmin, tmax);
+        first = std::max(first, cutoff);
+        if (first >= end) return {};
         const auto n = static_cast<std::size_t>(end - first);
         const auto pixels = std::clamp(pixel_width, std::size_t{1}, n);
         std::vector<PlotPoint> result;
         const auto push = [&](std::uint64_t frame) {
-            result.push_back({static_cast<double>(frame) / sample_rate, value(frame, channel)});
+            result.push_back({time(frame), value(frame, channel)});
         };
         if ((n + 3) / 4 <= pixels) {
             result.reserve(n);
@@ -202,13 +221,13 @@ struct SampleStorage {
 
 namespace {
 std::size_t checked_capacity(double rate, double seconds, std::size_t channels) {
-    if (!std::isfinite(rate) || rate <= 0 || !std::isfinite(seconds) || seconds <= 0 || !channels)
+    if (!std::isfinite(rate) || rate <= 0 || !std::isfinite(seconds) || seconds <= 0)
         throw std::invalid_argument("Sample rate, history duration and channel count must be positive");
     const long double exact_frames = static_cast<long double>(rate) * seconds;
     const long double rounding_slack = 8 * std::numeric_limits<double>::epsilon() *
                                        std::max(1.0L, std::abs(exact_frames));
     const long double frames = std::max(1.0L, std::ceil(exact_frames - rounding_slack));
-    const auto limit = std::numeric_limits<std::size_t>::max() / channels / sizeof(float);
+    const auto limit = std::numeric_limits<std::size_t>::max() / std::max(std::size_t{1}, channels) / sizeof(float);
     if (frames > static_cast<long double>(limit))
         throw std::length_error("History buffer is too large");
     return static_cast<std::size_t>(frames);
@@ -218,8 +237,9 @@ std::size_t checked_capacity(double rate, double seconds, std::size_t channels) 
 struct DataStore::Impl {
     mutable std::mutex mutex;
     detail::SampleStorage storage;
+    std::vector<std::uint64_t> cleared;
     Impl(double rate, double seconds, std::vector<ChannelInfo> metadata)
-        : storage(rate, checked_capacity(rate, seconds, metadata.size()), metadata) {}
+        : storage(rate, checked_capacity(rate, seconds, metadata.size()), metadata), cleared(metadata.size()) {}
 };
 
 std::vector<ChannelInfo> simulation_channels() {
@@ -231,9 +251,78 @@ std::vector<ChannelInfo> simulation_channels() {
 DataStore::DataStore(double rate, double seconds, std::vector<ChannelInfo> channels)
     : impl_(std::make_unique<Impl>(rate, seconds, std::move(channels))) {}
 DataStore::~DataStore() = default;
+void DataStore::configure(double rate, std::vector<ChannelInfo> channels, bool reception_time) {
+    if (!std::isfinite(rate) || (reception_time ? rate != 0 : rate <= 0) || channels.empty() || channels.size() > 64)
+        throw std::invalid_argument("Invalid channel configuration");
+    detail::SampleStorage replacement(rate, capacity_frames(), std::move(channels), reception_time);
+    std::vector<std::uint64_t> cleared(replacement.channels.size());
+    const std::lock_guard lock(impl_->mutex);
+    impl_->storage = std::move(replacement);
+    impl_->cleared = std::move(cleared);
+}
+void DataStore::clear_channel(std::size_t channel) {
+    const std::lock_guard lock(impl_->mutex);
+    impl_->cleared.at(channel) = impl_->storage.next_frame;
+}
+std::uint64_t DataStore::channel_first_frame(std::size_t channel) const {
+    const std::lock_guard lock(impl_->mutex);
+    return impl_->cleared.at(channel);
+}
 const std::vector<ChannelInfo>& DataStore::channels() const { return impl_->storage.channels; }
 double DataStore::sample_rate() const { return impl_->storage.sample_rate; }
-std::size_t DataStore::capacity_frames() const { return impl_->storage.capacity; }
+bool DataStore::reception_time() const { return impl_->storage.reception_time; }
+double DataStore::frame_time(std::uint64_t frame) const {
+    const std::lock_guard lock(impl_->mutex);
+    const auto& s = impl_->storage;
+    return s.count ? s.time(std::clamp(frame, s.first_frame, s.next_frame - 1)) : 0;
+}
+void DataStore::append_received(std::uint64_t frame, std::span<const float> values, double seconds) {
+    if (!reception_time() || values.size() != channels().size() || values.empty() ||
+        !std::isfinite(seconds) || seconds < 0 || frame == std::numeric_limits<std::uint64_t>::max() ||
+        std::any_of(values.begin(), values.end(), [](float v){return !std::isfinite(v);}))
+        throw std::invalid_argument("Invalid receiver-timed sample");
+    const std::lock_guard lock(impl_->mutex);
+    auto& s = impl_->storage;
+    if (s.count && (frame < s.next_frame || seconds <= s.time(s.next_frame - 1)))
+        throw std::invalid_argument("Receiver time and sequence must increase");
+    s.append(frame, values, std::span<const double>(&seconds, 1));
+}
+std::size_t DataStore::capacity_frames() const {
+    const std::lock_guard lock(impl_->mutex);
+    return impl_->storage.capacity;
+}
+
+void DataStore::set_capacity_frames(std::size_t frames) {
+    if (frames < 8 || frames > 2'000'000)
+        throw std::invalid_argument("Buffer capacity must be between 8 and 2000000 points per channel");
+    if (frames == capacity_frames()) return;
+    // Allocate before taking the producer lock. Commit only after all retained
+    // samples and summaries have been rebuilt successfully.
+    detail::SampleStorage replacement(sample_rate(), frames, channels(), reception_time());
+    const std::lock_guard lock(impl_->mutex);
+    auto& current = impl_->storage;
+    const auto count = std::min(current.count, frames);
+    const auto first = current.next_frame - count;
+    const auto channels_count = current.channels.size();
+    if (count) {
+        const auto slot = static_cast<std::size_t>(first % current.capacity);
+        const auto first_part = std::min(count, current.capacity - slot);
+        const std::span<const float> values(current.values);
+        const std::span<const double> times(current.times);
+        replacement.append(first, values.subspan(slot * channels_count, first_part * channels_count),
+                           current.reception_time ? times.subspan(slot, first_part) : std::span<const double>{});
+        replacement.append(first + first_part, values.first((count - first_part) * channels_count),
+                           current.reception_time ? times.first(count - first_part) : std::span<const double>{});
+    }
+    // Metadata has stable addresses for producers and consumers.
+    std::swap(current.capacity, replacement.capacity);
+    current.values.swap(replacement.values);
+    current.times.swap(replacement.times);
+    current.summaries.swap(replacement.summaries);
+    current.first_frame = replacement.first_frame;
+    current.next_frame = replacement.next_frame;
+    current.count = replacement.count;
+}
 
 DataRange DataStore::range() const {
     const std::lock_guard lock(impl_->mutex);
@@ -241,7 +330,9 @@ DataRange DataStore::range() const {
 }
 
 void DataStore::append(std::uint64_t first_frame, std::span<const float> values) {
+    if (reception_time()) throw std::invalid_argument("Use receiver-timed samples for this source");
     const auto channel_count = channels().size();
+    if (!channel_count) throw std::invalid_argument("Register channels before appending data");
     if (values.size() % channel_count != 0)
         throw std::invalid_argument("Batch does not contain whole interleaved frames");
     const auto frames = values.size() / channel_count;
@@ -257,27 +348,37 @@ void DataStore::clear() {
     const std::lock_guard lock(impl_->mutex);
     impl_->storage.count = 0;
     impl_->storage.first_frame = impl_->storage.next_frame = 0;
+    std::fill(impl_->cleared.begin(), impl_->cleared.end(), 0);
 }
 
 std::vector<PlotPoint> DataStore::query(std::size_t channel, double tmin, double tmax,
-                                      std::size_t pixel_width) const {
+                                      std::size_t pixel_width, std::uint64_t first_frame) const {
     const std::lock_guard lock(impl_->mutex);
-    return impl_->storage.query(channel, tmin, tmax, pixel_width);
+    if (channel >= impl_->cleared.size()) return {};
+    return impl_->storage.query(channel, tmin, tmax, pixel_width, std::max(first_frame, impl_->cleared[channel]));
 }
 
 FrozenData DataStore::snapshot(double tmin, double tmax) const {
+    if (channels().empty()) return {};
     std::vector<float> copied;
+    std::vector<double> times;
+    std::vector<std::uint64_t> cleared;
     std::uint64_t first = 0;
     {
         const std::lock_guard lock(impl_->mutex);
+        cleared = impl_->cleared;
         const auto bounds = impl_->storage.interval(tmin, tmax);
         first = bounds.first;
         const auto count = static_cast<std::size_t>(bounds.second - bounds.first);
         const auto channel_count = channels().size();
         copied.resize(count * channel_count);
         if (count) {
-            const auto slot = static_cast<std::size_t>(first % capacity_frames());
-            const auto first_part = std::min(count, capacity_frames() - slot);
+            if (reception_time()) {
+                times.reserve(count);
+                for (auto frame = first; frame < bounds.second; ++frame) times.push_back(impl_->storage.time(frame));
+            }
+            const auto slot = static_cast<std::size_t>(first % impl_->storage.capacity);
+            const auto first_part = std::min(count, impl_->storage.capacity - slot);
             std::copy_n(impl_->storage.values.begin() + slot * channel_count,
                         first_part * channel_count, copied.begin());
             std::copy_n(impl_->storage.values.begin(), (count - first_part) * channel_count,
@@ -287,10 +388,11 @@ FrozenData DataStore::snapshot(double tmin, double tmax) const {
     // Allocate/build the independent summary pyramid after releasing the
     // producer lock. Only the chronological sample copy is synchronized.
     auto storage = std::make_shared<detail::SampleStorage>(
-        sample_rate(), std::max(std::size_t{1}, copied.size() / channels().size()), channels());
-    storage->append(first, copied);
+        sample_rate(), std::max(std::size_t{1}, copied.size() / channels().size()), channels(), reception_time());
+    storage->append(first, copied, times);
     FrozenData result;
     result.storage_ = std::move(storage);
+    result.cleared_ = std::move(cleared);
     return result;
 }
 
@@ -300,9 +402,24 @@ const std::vector<ChannelInfo>& FrozenData::channels() const {
 }
 double FrozenData::sample_rate() const { return storage_ ? storage_->sample_rate : 0; }
 DataRange FrozenData::range() const { return storage_ ? storage_->range() : DataRange{}; }
+double FrozenData::frame_time(std::uint64_t frame) const {
+    return storage_ && storage_->count ? storage_->time(std::clamp(frame, storage_->first_frame, storage_->next_frame - 1)) : 0;
+}
+std::unique_ptr<DataStore> DataStore::resized_copy(std::size_t frames) const {
+    auto result=std::make_unique<DataStore>(1,1,std::vector<ChannelInfo>{});
+    {
+        const std::lock_guard lock(impl_->mutex);
+        result->impl_->storage=impl_->storage;
+        result->impl_->cleared=impl_->cleared;
+    }
+    result->set_capacity_frames(frames);
+    return result;
+}
 std::vector<PlotPoint> FrozenData::query(std::size_t channel, double tmin, double tmax,
-                                      std::size_t pixel_width) const {
-    return storage_ ? storage_->query(channel, tmin, tmax, pixel_width) : std::vector<PlotPoint>{};
+                                      std::size_t pixel_width, std::uint64_t first_frame) const {
+    if (!storage_) return {};
+    if (channel < cleared_.size()) first_frame = std::max(first_frame, cleared_[channel]);
+    return storage_->query(channel, tmin, tmax, pixel_width, first_frame);
 }
 
 struct SimulationSource::Impl {

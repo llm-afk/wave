@@ -1,4 +1,5 @@
 // Window/DirectX setup adapted from Dear ImGui's MIT-licensed Win32/DX11 example.
+#include "tcp_source.hpp"
 #include "data_core.hpp"
 #include "wave_view.hpp"
 #include "imgui.h"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,9 @@ ID3D11DeviceContext* device_context{};
 IDXGISwapChain* swap_chain{};
 ID3D11RenderTargetView* render_target{};
 UINT resize_width{}, resize_height{};
+constexpr UINT_PTR move_size_timer = 1;
+bool moving_or_sizing = false;
+std::function<void()> render_frame;
 
 bool make_render_target() {
     ID3D11Texture2D* buffer{};
@@ -84,13 +89,40 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 LRESULT WINAPI window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam)) return 1;
     switch (message) {
+    case WM_ENTERSIZEMOVE:
+        moving_or_sizing = true;
+        SetTimer(window, move_size_timer, 16, nullptr);
+        return 0;
+    case WM_TIMER:
+        // DefWindowProc runs a nested message loop while moving/resizing.
+        // Keep rendering on the UI thread even while the outer loop is blocked.
+        if (wparam == move_size_timer && moving_or_sizing) {
+            if (render_frame) render_frame();
+            return 0;
+        }
+        break;
+    case WM_EXITSIZEMOVE:
+        moving_or_sizing = false;
+        KillTimer(window, move_size_timer);
+        if (render_frame) render_frame();
+        return 0;
+    case WM_DPICHANGED: {
+        const auto* rect = reinterpret_cast<const RECT*>(lparam);
+        SetWindowPos(window, nullptr, rect->left, rect->top,
+            rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_SIZE:
         if (wparam != SIZE_MINIMIZED) { resize_width = LOWORD(lparam); resize_height = HIWORD(lparam); }
         return 0;
     case WM_SYSCOMMAND:
         if ((wparam & 0xfff0) == SC_KEYMENU) return 0;
         break;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY:
+        moving_or_sizing = false;
+        KillTimer(window, move_size_timer);
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProcW(window, message, wparam, lparam);
 }
@@ -127,25 +159,87 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.IniFilename = nullptr; // This minimal demo starts with a predictable layout.
     const char* font = "C:\\Windows\\Fonts\\msyh.ttc";
-    if (GetFileAttributesA(font) != INVALID_FILE_ATTRIBUTES) io.Fonts->AddFontFromFileTTF(font, 14);
+    if (GetFileAttributesA(font) != INVALID_FILE_ATTRIBUTES) io.Fonts->AddFontFromFileTTF(font, 16);
     else io.Fonts->AddFontDefault();
-    wave::apply_style(scale);
+    float current_dpi_scale = ImGui_ImplWin32_GetDpiScaleForHwnd(window);
+    wave::apply_style(current_dpi_scale);
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(device, device_context);
 
-    wave::DataStore data;
-    wave::WaveView view(data);
-    wave::SimulationSource test_signal(data);
-    test_signal.start();
+    wave::SignalHub data;
+    wave::WaveView view(data, 30.0);
+    std::unique_ptr<wave::tcp::Receiver> receiver;
+    auto retry_listener_at = std::chrono::steady_clock::time_point{};
     ShowWindow(window, SW_SHOWDEFAULT);
     UpdateWindow(window);
     bool done = false;
     bool occluded = false;
     bool render_failed = false;
     std::size_t frame_count = 0, max_points = 0, presented_frames = 0;
+    std::size_t move_size_frames = 0;
     double frame_work_ms = 0;
     const auto started = std::chrono::steady_clock::now();
-    while (!done) {
+    bool rendering = false;
+    std::wstring previous_title;
+    render_frame = [&] {
+        if (rendering || done || render_failed) return;
+        struct FrameGuard {
+            bool& active;
+            explicit FrameGuard(bool& value) : active(value) { active = true; }
+            ~FrameGuard() { active = false; }
+        } guard(rendering);
+        if (!receiver && std::chrono::steady_clock::now() >= retry_listener_at) {
+            try { receiver = std::make_unique<wave::tcp::Receiver>(data); }
+            catch (const std::exception&) {
+                retry_listener_at = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                SetWindowTextW(window, L"Wave | 暂时无法接收数据，正在重试");
+            }
+        }
+        if (receiver) {
+            receiver->poll();
+            const auto title = std::wstring(L"Wave");
+            if (title != previous_title) { SetWindowTextW(window, title.c_str()); previous_title = title; }
+        }
+        const float dpi_scale = ImGui_ImplWin32_GetDpiScaleForHwnd(window);
+        if (dpi_scale != current_dpi_scale) {
+            current_dpi_scale = dpi_scale;
+            wave::apply_style(current_dpi_scale);
+        }
+        // Normal use sleeps when hidden. Smoke mode still exercises frame
+        // generation and DX11 submission on non-interactive test desktops.
+        if (!smoke && (IsIconic(window) || (occluded && swap_chain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED))) {
+            return;
+        }
+        occluded = false;
+        if (resize_width && resize_height) {
+            release_render_target();
+            if (FAILED(swap_chain->ResizeBuffers(0, resize_width, resize_height, DXGI_FORMAT_UNKNOWN, 0))
+                || !make_render_target()) { render_failed = true; return; }
+            resize_width = resize_height = 0;
+        }
+        const auto work_started = std::chrono::steady_clock::now();
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        view.set_source_connected(receiver && receiver->connected.load());
+        view.draw();
+        ImGui::Render();
+        const float clear[] = {0, 0, 0, 1};
+        device_context->OMSetRenderTargets(1, &render_target, nullptr);
+        device_context->ClearRenderTargetView(render_target, clear);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        frame_work_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - work_started).count();
+        ++frame_count;
+        if (moving_or_sizing) ++move_size_frames;
+        max_points = std::max(max_points, view.points_this_frame());
+        // One vertical blank interval: DXGI follows the display containing
+        // most of the window, including when it moves to a different monitor.
+        const auto result = swap_chain->Present(1, 0);
+        occluded = result == DXGI_STATUS_OCCLUDED;
+        if (FAILED(result)) { render_failed = true; return; }
+        if (result == S_OK) ++presented_frames;
+    };
+    while (!done && !render_failed) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&message);
@@ -155,52 +249,26 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         if (done) break;
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         if (smoke && seconds >= 12) break;
-        // Normal use sleeps when hidden. Smoke mode still exercises frame
-        // generation and DX11 submission on non-interactive test desktops.
-        if (!smoke && (IsIconic(window) || (occluded && swap_chain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED))) {
-            Sleep(20);
-            continue;
-        }
-        occluded = false;
-        if (resize_width && resize_height) {
-            release_render_target();
-            if (FAILED(swap_chain->ResizeBuffers(0, resize_width, resize_height, DXGI_FORMAT_UNKNOWN, 0))
-                || !make_render_target()) { render_failed = true; break; }
-            resize_width = resize_height = 0;
-        }
-        const auto work_started = std::chrono::steady_clock::now();
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        view.draw();
-        ImGui::Render();
-        const float clear[] = {0, 0, 0, 1};
-        device_context->OMSetRenderTargets(1, &render_target, nullptr);
-        device_context->ClearRenderTargetView(render_target, clear);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        frame_work_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - work_started).count();
-        ++frame_count;
-        max_points = std::max(max_points, view.points_this_frame());
-        // One vertical blank interval: DXGI follows the display containing
-        // most of the window, including when it moves to a different monitor.
-        const auto result = swap_chain->Present(1, 0);
-        occluded = result == DXGI_STATUS_OCCLUDED;
-        if (FAILED(result)) { render_failed = true; break; }
-        if (result == S_OK) ++presented_frames;
-        // Hidden smoke runs still exercise rendering, but Present may return
-        // immediately there. Only this off-screen path needs a CPU throttle.
-        if (smoke && occluded) Sleep(20);
+        render_frame();
+        // Throttle hidden windows without blocking the move/size callback.
+        if (occluded || IsIconic(window)) Sleep(20);
     }
-    test_signal.stop();
+    KillTimer(window, move_size_timer);
+    moving_or_sizing = false;
+    render_frame = {};
+    if (receiver) receiver->stop();
     if (smoke) {
-        const auto stats = test_signal.stats();
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         std::ofstream report("smoke-test.json");
         report << "{\n  \"sample_rate_per_channel\": " << data.sample_rate()
+            << ",\n  \"tcp_frames\": " << (receiver ? receiver->frames.load() : 0)
+            << ",\n  \"tcp_batches\": " << (receiver ? receiver->batches.load() : 0)
+            << ",\n  \"tcp_rejected\": " << (receiver ? receiver->rejected.load() : 0)
             << ",\n  \"channels\": " << data.channels().size()
-            << ",\n  \"produced_frames\": " << stats.produced_frames
-            << ",\n  \"skipped_frames\": " << stats.skipped_frames
+            << ",\n  \"sources\": " << data.source_count()
+            << ",\n  \"tcp_gaps\": " << (receiver ? receiver->gaps.load() : 0)
             << ",\n  \"rendered_frames\": " << frame_count
+            << ",\n  \"move_size_frames\": " << move_size_frames
             << ",\n  \"elapsed_seconds\": " << elapsed
             << ",\n  \"average_render_loop_fps\": " << frame_count / std::max(0.001, elapsed)
             << ",\n  \"presented_frames\": " << presented_frames
@@ -215,5 +283,5 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     cleanup_device();
     DestroyWindow(window);
     UnregisterClassW(cls.lpszClassName, instance);
-    return render_failed || (smoke && (frame_count == 0 || max_points == 0)) ? 1 : 0;
+    return render_failed || (smoke && frame_count == 0) ? 1 : 0;
 }

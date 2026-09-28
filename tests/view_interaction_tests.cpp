@@ -1,4 +1,5 @@
 #include "wave_view.hpp"
+#include "signal_hub.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "implot.h"
@@ -33,7 +34,7 @@ struct PlotState {
 
 class Fixture {
 public:
-    Fixture() : store(20'000.0, 5.0, {{"Sine", "V"}}) {
+    Fixture(std::vector<wave::ChannelInfo> channels = {{"Sine", "V"}}, wave::SignalHub* hub=nullptr) : store(20'000.0, 5.0, channels) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImPlot::CreateContext();
@@ -43,6 +44,8 @@ public:
         io.IniFilename = nullptr;
         io.LogFilename = nullptr;
         io.ConfigInputTrickleEventQueue = false;
+        // Match the DX11 backend: multiple preview curves may exceed 64K vertices.
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
         io.Fonts->AddFontDefault();
         unsigned char* pixels = nullptr;
@@ -52,7 +55,7 @@ public:
         io.Fonts->SetTexID(static_cast<ImTextureID>(1));
         wave::apply_style();
         append_second(0, 1.0f);
-        view = std::make_unique<wave::WaveView>(store);
+        view = hub ? std::make_unique<wave::WaveView>(*hub) : std::make_unique<wave::WaveView>(store);
         for (int i = 0; i < 8; ++i) frame();
         require(GImPlot->Plots.GetAliveCount() > 0, "WaveView must create an ImPlot plot");
         for (int i = 0; i < GImPlot->Plots.GetMapSize(); ++i) {
@@ -66,6 +69,14 @@ public:
                 "Wave plot must have a usable visible rectangle");
         require(initial.x.Size() > 0 && initial.y.Size() > 0, "Initial axes must have finite positive ranges");
         require(!popup_open(), "Test must start without an open popup");
+        require(points_drawn() == 0, "Initial window must not automatically select a channel");
+        append_second(1, 1.0f);
+        frame();
+        require(points_drawn() == 0, "Incoming data must not automatically select a channel");
+        require(near(state().x.Min, initial.x.Min) && near(state().x.Max, initial.x.Max),
+                "Incoming data must not scroll an empty window's X axis");
+        toggle_channel(0);
+        for (int i = 0; i < 8; ++i) frame();
     }
 
     ~Fixture() {
@@ -115,28 +126,6 @@ public:
         frame();
     }
 
-    void view_entire_cache() {
-        move(press_point());
-        right(true);
-        right(false);
-        frame();
-        require(popup_open() && GImGui->OpenPopupStack.back().Window != nullptr,
-                "History setup must open the real plot context menu");
-        const auto* popup = GImGui->OpenPopupStack.back().Window;
-        const auto target = ImHashStr("查看整个缓存", 0, popup->IDStack.back());
-        // Read only the focused item ID; select the menu through queued keys,
-        // without changing the view's follow flag or other production state.
-        move({-1000, -1000});
-        for (int i = 0; i < 12 && GImGui->NavId != target; ++i)
-            press_key(ImGuiKey_DownArrow);
-        require(GImGui->NavId == target, "Keyboard navigation must reach the entire-cache menu item");
-        press_key(ImGuiKey_Enter);
-        frame();
-        require(!popup_open(), "Selecting the entire-cache menu item must close the popup");
-        require(state().x.Size() > 0.9 && near(state().x.Min, 0.0),
-                "Entire-cache menu must expose the one-second history rather than the live 200 ms span");
-    }
-
     void double_click(ImVec2 point) {
         move(point);
         // Separate this pair from any previous left click without sleeping:
@@ -184,6 +173,22 @@ public:
                 std::floor(rect.Min.y + rect.GetHeight() * 0.62f)};
     }
 
+    ImVec2 x_axis_point() const {
+        const auto* plot = GImPlot->Plots.GetByKey(plot_id);
+        return {std::floor(plot->PlotRect.GetCenter().x),
+            std::floor((plot->PlotRect.Max.y + plot->FrameRect.Max.y) * 0.5f)};
+    }
+    void middle(bool down) {
+        ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Middle, down);
+        frame();
+    }
+    void middle_double_click(ImVec2 point) {
+        move(point);
+        for(int i=0;i<32;++i) frame();
+        middle(true); middle(false); middle(true);
+        require(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle), "Middle double click must be recognized");
+        middle(false); frame();
+    }
     ImVec2 y_axis_point(bool inside_plot) const {
         const auto* plot = GImPlot->Plots.GetByKey(plot_id);
         require(plot != nullptr, "Y-axis hit test needs a live plot");
@@ -201,12 +206,11 @@ public:
     double latest_time() const { return store.range().end; }
 
     std::size_t points_drawn() const { return view->points_this_frame(); }
-
-    ImVec2 zoom_button_point() const {
-        const auto rect = state().rect;
-        const float scale = ImGui::GetStyle().FontScaleDpi;
-        return {std::floor(rect.Max.x - 27.0f * scale),
-                std::floor(rect.Min.y + 12.0f * scale)};
+    void clear_channel_from_source(std::size_t channel) { store.clear_channel(channel); frame(); }
+    void register_external_channels() {
+        store.configure(10, {{"Current", "A", "ia"}, {"Temperature", "C", "temp"}});
+        store.append(0, std::vector<float>{1,20,2,21,3,22});
+        frame();
     }
 
     void click(ImVec2 point) {
@@ -216,7 +220,124 @@ public:
         frame();
     }
 
-    void toggle_overview() { click(zoom_button_point()); }
+    void toggle_channel(std::size_t channel) {
+        move(press_point());
+        right(true);
+        right(false);
+        frame();
+        require(popup_open(), "Channel selector must open");
+        const auto* popup = GImGui->OpenPopupStack.back().Window;
+        require(popup != nullptr, "Channel selector must have a window");
+        const auto start = popup->DC.CursorStartPos;
+        const float row = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
+        click({start.x + 8, start.y + static_cast<float>(channel) * row + ImGui::GetFrameHeight() * 0.5f});
+        press_key(ImGuiKey_Escape);
+        frame();
+    }
+
+    bool overview_has_color(ImVec4 color) const {
+        const auto* window = overview_window();
+        require(window != nullptr, "Overview must be open for rendering checks");
+        const auto expected = ImGui::GetColorU32(color);
+        for (const auto& vertex : window->DrawList->VtxBuffer)
+            if (vertex.col == expected) return true;
+        return false;
+    }
+
+    void require_unitless_legend() const {
+        auto* plot = GImPlot->Plots.GetByKey(plot_id);
+        require(plot != nullptr, "Main plot must exist");
+        for (int i = 0; i < plot->Items.GetLegendCount(); ++i)
+            require(std::string(plot->Items.GetLegendLabel(i)).find('[') == std::string::npos,
+                    "Legend must omit unit suffixes even when channel metadata has a unit");
+    }
+    float overview_outline_width() const {
+        const auto* window = overview_window();
+        require(window != nullptr, "Overview must exist");
+        float left = 1e9f, right = -1e9f;
+        for (const auto& vertex : window->DrawList->VtxBuffer) {
+            if (vertex.col != IM_COL32(151, 184, 206, 220)) continue;
+            left = std::min(left, vertex.pos.x);
+            right = std::max(right, vertex.pos.x);
+        }
+        require(right >= left, "Selection outline must be visible");
+        return right - left;
+    }
+    float overview_outline_right() const {
+        const auto* window = overview_window();
+        require(window != nullptr, "Overview must exist");
+        float right = -1e9f;
+        for (const auto& vertex : window->DrawList->VtxBuffer)
+            if (vertex.col == IM_COL32(151, 184, 206, 220)) right = std::max(right, vertex.pos.x);
+        require(right > 0, "Selection outline must be visible");
+        return right;
+    }
+    double rendered_y_tick_extent() const {
+        const auto* plot = GImPlot->Plots.GetByKey(plot_id);
+        double extent = 0;
+        for (const auto& tick : plot->Axes[ImAxis_Y1].Ticker.Ticks)
+            if (tick.ShowLabel) extent = std::max(extent, std::abs(tick.PlotPos));
+        return extent;
+    }
+    bool auto_y_enabled() const {
+        return (GImPlot->Plots.GetByKey(plot_id)->Axes[ImAxis_Y1].Flags & ImPlotAxisFlags_AutoFit) != 0;
+    }
+    void toggle_auto_y() {
+        move(press_point()); right(true); right(false); frame();
+        require(popup_open(), "Y auto-fit menu must open");
+        auto* popup = GImGui->OpenPopupStack.back().Window;
+        const auto target = ImHashStr("Y 轴自适应", 0, popup->IDStack.back());
+        move({-1000, -1000});
+        for (int i = 0; i < 12 && GImGui->NavId != target; ++i) press_key(ImGuiKey_DownArrow);
+        require(GImGui->NavId == target, "Y auto-fit entry must be reachable");
+        press_key(ImGuiKey_Enter); press_key(ImGuiKey_Escape); frame();
+    }
+    void clear_buffer_via_menu(bool local = false) {
+        if (local) { move(press_point()); right(true); right(false); frame(); }
+        else {
+            const auto* menu = ImGui::FindWindowByName("##MainMenuBar");
+            const float x = menu->Pos.x + ImGui::GetStyle().WindowPadding.x +
+                ImGui::CalcTextSize("新增窗口").x + 2 * ImGui::GetStyle().ItemSpacing.x +
+                ImGui::CalcTextSize("设置").x * 0.5f;
+            click({x, menu->Pos.y + menu->Size.y * 0.5f}); frame();
+        }
+        require(popup_open(), "Buffer clear menu must open");
+        auto* popup = GImGui->OpenPopupStack.back().Window;
+        const auto target = ImHashStr(local ? "清空数据" : "清空全部缓冲区", 0, popup->IDStack.back());
+        move({-1000, -1000});
+        for (int i = 0; i < 16 && GImGui->NavId != target; ++i) press_key(ImGuiKey_DownArrow);
+        require(GImGui->NavId == target, "Buffer clear entry must be reachable");
+        press_key(ImGuiKey_Enter); frame(); frame();
+        require(local ? !store.range().empty : store.range().empty,
+                "Only global clear may erase shared history");
+    }
+    void select_other_signal() {
+        move(other_panel_state().rect.GetCenter()); right(true); right(false); frame();
+        require(popup_open(), "Other panel menu must open");
+        const auto* popup = GImGui->OpenPopupStack.back().Window;
+        click({popup->DC.CursorStartPos.x + 8, popup->DC.CursorStartPos.y + ImGui::GetFrameHeight() * 0.5f});
+        press_key(ImGuiKey_Escape); frame();
+    }
+    void toggle_overview() {
+        const bool was_open = overview_window() != nullptr;
+        move(press_point());
+        right(true);
+        right(false);
+        frame();
+        require(popup_open(), "Zoom must be available in the plot context menu");
+        auto* popup = GImGui->OpenPopupStack.back().Window;
+        const auto target = ImHashStr("Zoom", 0, popup->IDStack.back());
+        move({-1000, -1000});
+        for (int i = 0; i < 12 && GImGui->NavId != target; ++i) press_key(ImGuiKey_DownArrow);
+        require(GImGui->NavId == target, "Zoom menu item must be reachable");
+        const auto rect = popup->NavRectRel[0];
+        const ImVec2 point{popup->Pos.x + rect.GetCenter().x, popup->Pos.y + rect.GetCenter().y};
+        click(point);
+        require(popup_open() && (overview_window() != nullptr) != was_open,
+                "A single click must toggle Zoom while retaining the visible menu state");
+        press_key(ImGuiKey_Escape);
+        frame();
+    }
 
     ImGuiWindow* overview_window() const {
         const auto rect = state().rect;
@@ -262,17 +383,84 @@ public:
         return {std::floor(x), std::floor(canvas.GetCenter().y)};
     }
 
+    int active_panel_count() const {
+        int count = 0;
+        for (auto* window : GImGui->Windows)
+            if (window->Active && std::string(window->Name).find("/panel_") != std::string::npos &&
+                std::string(window->Name).find("zoom_overview") == std::string::npos) ++count;
+        return count;
+    }
+
+    void remove_first_window() {
+        ImGuiWindow* panel = nullptr;
+        for (auto* window : GImGui->Windows)
+            if (window->Active && std::string(window->Name).find("/panel_") != std::string::npos &&
+                std::string(window->Name).find("zoom_overview") == std::string::npos) { panel = window; break; }
+        require(panel != nullptr, "Removal needs an active panel");
+        move(panel->InnerRect.GetCenter());
+        right(true);
+        right(false);
+        frame();
+        require(popup_open(), "Removal menu must open");
+        const auto* popup = GImGui->OpenPopupStack.back().Window;
+        const auto target = ImHashStr("删除窗口", 0, popup->IDStack.back());
+        move({-1000, -1000});
+        for (int i = 0; i < 12 && GImGui->NavId != target; ++i) press_key(ImGuiKey_DownArrow);
+        require(GImGui->NavId == target, "Removal entry must be reachable");
+        require(popup->Pos.y + popup->NavRectRel[0].Max.y <= popup->InnerClipRect.Max.y,
+                "Removal row must fit fully inside the popup without bottom clipping");
+        press_key(ImGuiKey_Enter);
+        frame();
+        frame();
+    }
+    void enable_all_y_autofit() {
+        const auto* menu = ImGui::FindWindowByName("##MainMenuBar");
+        const float x = menu->Pos.x + ImGui::GetStyle().WindowPadding.x +
+            ImGui::CalcTextSize("新增窗口").x + 2 * ImGui::GetStyle().ItemSpacing.x +
+            ImGui::CalcTextSize("设置").x * 0.5f;
+        click({x, menu->Pos.y + menu->Size.y * 0.5f}); frame();
+        require(popup_open(), "Settings popup must open");
+        auto* popup = GImGui->OpenPopupStack.back().Window;
+        const auto target = ImHashStr("Y 轴自适应", 0, popup->IDStack.back());
+        move({-1000, -1000});
+        for (int i = 0; i < 8 && GImGui->NavId != target; ++i) press_key(ImGuiKey_DownArrow);
+        require(GImGui->NavId == target, "Global Y auto-fit action must be reachable");
+        press_key(ImGuiKey_Enter); frame(); frame();
+    }
+    bool other_auto_y_enabled() const {
+        for (int i = 0; i < GImPlot->Plots.GetMapSize(); ++i)
+            if (const auto* plot = GImPlot->Plots.TryGetMapData(i); plot && plot->ID != plot_id)
+                return (plot->Axes[ImAxis_Y1].Flags & ImPlotAxisFlags_AutoFit) != 0;
+        throw std::runtime_error("Second panel is required");
+    }
+    void toggle_x_link() {
+        const auto* menu = ImGui::FindWindowByName("##MainMenuBar");
+        const float x = menu->Pos.x + ImGui::GetStyle().WindowPadding.x +
+            ImGui::CalcTextSize("新增窗口").x + 2 * ImGui::GetStyle().ItemSpacing.x +
+            ImGui::CalcTextSize("设置").x * 0.5f;
+        click({x, menu->Pos.y + menu->Size.y * 0.5f});
+        frame();
+        require(popup_open(), "Settings popup must open");
+        auto* popup = GImGui->OpenPopupStack.back().Window;
+        const auto target = ImHashStr("X 轴联动", 0, popup->IDStack.back());
+        for (int i = 0; i < 8 && GImGui->NavId != target; ++i) press_key(ImGuiKey_DownArrow);
+        require(GImGui->NavId == target, "X link option must be reachable");
+        press_key(ImGuiKey_Enter);
+        press_key(ImGuiKey_Escape);
+        press_key(ImGuiKey_Escape);
+        frame();
+    }
     void add_window_via_menu() {
         const auto* menu = ImGui::FindWindowByName("##MainMenuBar");
         require(menu != nullptr, "Adding a panel must use the visible main menu");
-        // '+ 窗口' is the first menu entry. Aim just inside that entry using
+        // '新增窗口' is the first menu entry. Aim just inside that entry using
         // the actual menu window bounds rather than a screen-resolution guess.
         move({std::floor(menu->InnerRect.Min.x + ImGui::GetStyle().ItemSpacing.x + 1.0f),
               std::floor(menu->Pos.y + menu->Size.y * 0.5f)});
         left(true);
         left(false);
         for (int i = 0; i < 4; ++i) frame();
-        require(GImPlot->Plots.GetAliveCount() == 2, "Clicking '+ 窗口' must create a second panel");
+        require(GImPlot->Plots.GetAliveCount() == 2, "Clicking '新增窗口' must create a second panel");
     }
 
     PlotState other_panel_state() const {
@@ -283,12 +471,29 @@ public:
         throw std::runtime_error("Two-panel test must retain a second plot");
     }
 
+    void register_receiver_timed() {
+        store.configure(0, {{"Value", "", "v"}}, true);
+        const float value=2;
+        store.append_received(0,std::span<const float>(&value,1),0);
+        store.append_received(1,std::span<const float>(&value,1),0.37);
+        store.append_received(2,std::span<const float>(&value,1),1.2);
+        frame();
+    }
+    void source_online(bool online) {view->set_source_connected(online); frame();}
+    void small_history() {store.set_capacity_frames(20000); frame();}
+    void append_small_batch() {
+        const auto first = store.range().last_frame + 1;
+        std::vector<float> samples(1000 * store.channels().size(), 0.25f);
+        store.append(first, samples);
+    }
+
     void append_second(std::uint64_t first_frame, float amplitude) {
-        std::vector<float> samples(20'000);
+        const auto channels = store.channels().size();
+        std::vector<float> samples(20'000 * channels);
         constexpr double tau = 6.2831853071795864769;
         for (std::size_t i = 0; i < samples.size(); ++i)
             samples[i] = amplitude * static_cast<float>(std::sin(tau * 23.0 *
-                static_cast<double>(first_frame + i) / 20'000.0));
+                static_cast<double>(first_frame + i / channels) / 20'000.0));
         store.append(first_frame, samples);
     }
 
@@ -298,6 +503,388 @@ private:
     ImGuiID plot_id{};
 };
 
+void batched_display_is_continuous_and_freezes() {
+    Fixture f;
+    f.add_window_via_menu();
+    f.select_other_signal();
+    f.toggle_overview(); f.frame();
+    const auto right_edge = f.overview_outline_right();
+    double previous = f.state().x.Max;
+    int advances = 0;
+    for (int tick = 0; tick < 240; ++tick) {
+        if (tick % 3 == 0) f.append_small_batch();
+        f.frame();
+        const auto x = f.state().x;
+        require(std::abs(f.overview_outline_right() - right_edge) < 0.05f,
+                "Live overview right edge must not oscillate between batch arrival and display playhead");
+        require(near(x.Max, f.other_panel_state().x.Max), "Buffered windows must share a playhead");
+        require(x.Max <= f.latest_time() + 1e-6, "Buffered view cannot render future data");
+        if (tick > 40) {
+            require(x.Max >= previous && x.Max - previous < 0.019, "Small batches must scroll per render frame");
+            if (tick % 3 != 0 && x.Max > previous) ++advances;
+        }
+        previous = x.Max;
+    }
+    require(advances > 120, "Display must advance between packets");
+    f.small_history();
+    // A full one-second ring rolls over every 50 ms packet. Both outline edges
+    // must remain fixed while the underlying samples and time labels advance.
+    for(int tick=0;tick<30;++tick) {if(tick%3==0) f.append_small_batch(); f.frame();}
+    const auto stable_width=f.overview_outline_width();
+    for(int tick=0;tick<120;++tick) {
+        if(tick%3==0) f.append_small_batch();
+        f.frame();
+        require(std::abs(f.overview_outline_width()-stable_width)<0.05f,
+                "Full-buffer overview must keep a stable scale between packets");
+    }
+    f.press_space();
+    const auto frozen = f.state().x;
+    for (int tick = 0; tick < 30; ++tick) {
+        if (tick % 3 == 0) f.append_small_batch();
+        f.frame();
+        require(near(f.state().x.Max, frozen.Max), "Background buffering must not move paused axes");
+    }
+    f.press_space();
+    require(f.state().x.Max > frozen.Max, "Resume must return to the live playhead");
+    for (int tick = 0; tick < 60; ++tick) f.frame();
+    require(near(f.state().x.Max, f.latest_time()), "Disconnected display must drain to real data end");
+    std::cout << "PASS batch smoothing between packets, shared playhead, freeze/resume and stream end\n";
+}
+
+void remove_windows_and_recreate() {
+    Fixture f;
+    f.add_window_via_menu();
+    require(f.active_panel_count() == 2, "Two active panels must be visible");
+    f.remove_first_window();
+    require(f.active_panel_count() == 1, "Clear window must delete only one panel");
+    f.remove_first_window();
+    require(f.active_panel_count() == 0 && f.points_drawn() == 0,
+            "Removing the last panel must leave an empty canvas");
+    const auto* menu = ImGui::FindWindowByName("##MainMenuBar");
+    f.click({menu->InnerRect.Min.x + ImGui::GetStyle().ItemSpacing.x + 1,
+             menu->Pos.y + menu->Size.y * 0.5f});
+    f.frame();
+    require(f.active_panel_count() == 1, "New window must work from an empty canvas");
+    std::cout << "PASS deleting individual and last windows, then creating a new window\n";
+}
+void paused_x_link_is_global_and_optional() {
+    Fixture f;
+    f.add_window_via_menu();
+    f.select_other_signal();
+    f.press_space();
+    const auto other_y = f.other_panel_state().y;
+    const auto press = f.press_point();
+    f.move(press);
+    f.left(true);
+    f.move({press.x - 45, press.y + 20});
+    f.left(false);
+    f.frame();
+    auto first = f.state(), other = f.other_panel_state();
+    require(near(first.x.Min, other.x.Min) && near(first.x.Max, other.x.Max),
+            "Paused X link must be enabled by default for all windows");
+    require(near(other.y.Min, other_y.Min) && near(other.y.Max, other_y.Max),
+            "Linking X must leave other windows' Y axes unchanged");
+    f.wheel(2);
+    f.frame();
+    require(near(f.state().x.Min, f.other_panel_state().x.Min) && near(f.state().x.Max, f.other_panel_state().x.Max),
+            "Paused wheel zoom must link both X endpoints");
+    f.toggle_x_link();
+    const auto detached = f.other_panel_state();
+    f.move(f.press_point());
+    f.wheel(2);
+    f.frame();
+    require(near(f.other_panel_state().x.Min, detached.x.Min) && near(f.other_panel_state().x.Max, detached.x.Max),
+            "Disabling X link must restore independent inspection");
+    const auto before = f.state();
+    f.toggle_x_link();
+    require(near(f.state().x.Min, before.x.Min) && near(f.other_panel_state().x.Min, detached.x.Min),
+            "Enabling X link must not immediately jump either window");
+    f.toggle_overview();
+    f.click(f.overview_fraction_point(0.4f));
+    f.frame();
+    require(near(f.state().x.Min, f.other_panel_state().x.Min) && near(f.state().x.Max, f.other_panel_state().x.Max),
+            "Overview navigation must also link all paused windows");
+    f.press_space();
+    f.frame();
+    require(near(f.state().x.Max, f.latest_time()) && near(f.other_panel_state().x.Max, f.latest_time()),
+            "Resuming must follow latest data for both windows");
+    std::cout << "PASS default paused X link, independent Y, opt-out, no jump on enable and linked overview\n";
+}
+void axis_label_drag_and_wheel() {
+    Fixture f;
+    f.add_window_via_menu();
+    auto initial = f.state();
+    auto point = f.y_axis_point(false);
+    f.move(point); f.left(true);
+    f.move({point.x + 80, point.y + 30}); f.left(false); f.frame();
+    auto y_pan = f.state();
+    require(near(y_pan.x.Min, initial.x.Min) && near(y_pan.x.Max, initial.x.Max) &&
+            y_pan.y.Min > initial.y.Min && near(y_pan.y.Size(), initial.y.Size()),
+            "Y-label diagonal drag must pan only Y, even after entering the plot");
+    point = f.x_axis_point();
+    f.move(point); f.wheel(1); f.frame();
+    auto x_zoom = f.state();
+    require(x_zoom.x.Size() < y_pan.x.Size() && near(x_zoom.y.Min, y_pan.y.Min) && near(x_zoom.y.Max, y_pan.y.Max),
+            "X-label wheel must zoom only X");
+    point = f.x_axis_point();
+    f.move(point); f.left(true);
+    f.move({point.x + 40, point.y - 50});
+    f.append_second(20000, 5); f.frame();
+    require(near(f.state().x.Max, f.latest_time()) && near(f.state().x.Size(), x_zoom.x.Size()),
+            "Live X-label dragging must continue following new data while held");
+    f.left(false); f.frame();
+    f.append_second(40000, 5); f.frame();
+    require(near(f.state().x.Max, f.latest_time()) && near(f.state().y.Min, x_zoom.y.Min),
+            "Releasing an X-label drag must not freeze data or move Y");
+    f.press_space();
+    x_zoom = f.state();
+    point = f.x_axis_point();
+    f.move(point); f.left(true);
+    f.move({point.x + 40, point.y - 50}); f.left(false); f.frame();
+    auto x_pan = f.state();
+    require(x_pan.x.Min < x_zoom.x.Min && near(x_pan.x.Size(), x_zoom.x.Size()) &&
+            near(x_pan.y.Min, x_zoom.y.Min) && near(x_pan.y.Max, x_zoom.y.Max),
+            "Explicitly paused X-label diagonal drag must pan only X");
+    require(near(f.other_panel_state().x.Min, x_pan.x.Min) && near(f.other_panel_state().x.Max, x_pan.x.Max),
+            "Axis dragging must participate in global paused X linking");
+    f.append_second(60000, 5); f.frame();
+    require(near(f.state().x.Min, x_pan.x.Min), "X-axis pan must remain frozen while new data arrives");
+    f.move(f.press_point());
+    const auto before = f.state();
+    f.wheel(1); f.frame();
+    require(f.state().x.Size() < before.x.Size() && f.state().y.Size() < before.y.Size(),
+            "Plot-area wheel must zoom both axes");
+    std::cout << "PASS axis-label drag/wheel preserves live mode, explicit pause pans X, linking and plot XY wheel\n";
+}
+void live_x_link_tracks_zoom_and_new_data() {
+    Fixture f;
+    f.add_window_via_menu();
+    f.select_other_signal();
+    const auto other_y = f.other_panel_state().y;
+    auto check = [&]() {
+        f.frame();
+        const auto a = f.state(), b = f.other_panel_state();
+        require(near(a.x.Min, b.x.Min) && near(a.x.Max, b.x.Max) && near(a.x.Max, f.latest_time()),
+                "Live X edits must synchronize both windows while following latest data");
+        require(near(b.y.Min, other_y.Min) && near(b.y.Max, other_y.Max),
+                "Live X linking must not modify another window's Y range");
+    };
+    f.move(f.x_axis_point()); f.wheel(2); check();
+    f.append_second(20000, 1); check();
+    auto point = f.press_point();
+    f.move(point); f.right(true); f.move({point.x + 40, point.y}); f.right(false); check();
+    // The other window must be able to drive the link too.
+    point = f.other_panel_state().rect.GetCenter();
+    f.move(point); f.right(true); f.move({point.x + 30, point.y}); f.right(false); check();
+    f.toggle_overview(); f.click(f.overview_fraction_point(0.5f)); check();
+    f.toggle_x_link();
+    const auto detached = f.other_panel_state().x.Size();
+    f.move(f.x_axis_point()); f.wheel(2); f.frame();
+    require(near(f.other_panel_state().x.Size(), detached) && !near(f.state().x.Size(), detached),
+            "Disabling X link must permit independent live zoom");
+    f.toggle_x_link();
+    f.append_second(40000, 1); f.frame(); f.frame();
+    require(near(f.other_panel_state().x.Size(), detached),
+            "Live data arrival alone must not trigger synchronization after enabling");
+    f.move(f.x_axis_point()); f.wheel(1); check();
+    std::cout << "PASS live X link via wheel, either window, right drag and overview; opt-out and data arrival\n";
+}
+void axis_right_drag_locks_axis_and_keeps_arrow() {
+    Fixture f;
+    f.add_window_via_menu();
+    auto point = f.x_axis_point();
+    f.move(point);
+    require(ImGui::GetMouseCursor() == ImGuiMouseCursor_Arrow, "X labels must keep the normal cursor");
+    auto initial = f.state();
+    f.right(true); f.move({point.x + 45, point.y - 40}); f.right(false); f.frame();
+    auto zoomed = f.state();
+    require(zoomed.x.Size() < initial.x.Size() && near(zoomed.y.Min, initial.y.Min) && near(zoomed.y.Max, initial.y.Max),
+            "Right dragging X labels must zoom only X even after leaving the labels");
+    require(near(f.other_panel_state().x.Size(), zoomed.x.Size()), "Axis right zoom must participate in X linking");
+    point = f.y_axis_point(false);
+    f.move(point);
+    require(ImGui::GetMouseCursor() == ImGuiMouseCursor_Arrow, "Y labels must keep the normal cursor");
+    initial = f.state();
+    f.right(true); f.move({point.x + 50, point.y - 35}); f.right(false); f.frame();
+    zoomed = f.state();
+    require(zoomed.y.Size() < initial.y.Size() && near(zoomed.x.Min, initial.x.Min) && near(zoomed.x.Max, initial.x.Max),
+            "Right dragging Y labels must zoom only Y");
+    require(!f.popup_open(), "Axis right drag release must not open a menu");
+    std::cout << "PASS axis right zoom locks X/Y, links X and retains the arrow cursor\n";
+}
+void independent_y_autofit_and_manual_override() {
+    Fixture f;
+    require(f.auto_y_enabled(), "Initial window must default to Y auto-fit");
+    f.add_window_via_menu();
+    f.toggle_auto_y();
+    require(!f.auto_y_enabled(), "Menu must disable only the current window's Y auto-fit");
+    const auto held = f.state();
+    f.move(f.x_axis_point()); f.wheel(1); f.frame();
+    require(!f.auto_y_enabled() && near(f.state().y.Min, held.y.Min), "X zoom must preserve manual Y state");
+    f.toggle_auto_y();
+    f.press_space();
+    require(f.auto_y_enabled(), "Freezing must retain Y auto-fit");
+    auto point = f.x_axis_point();
+    f.move(point); f.left(true); f.move({point.x + 25, point.y - 30}); f.left(false); f.frame();
+    require(f.auto_y_enabled(), "X-only dragging must retain Y auto-fit");
+    point = f.y_axis_point(false);
+    f.move(point); f.left(true); f.move({point.x + 30, point.y + 25}); f.left(false); f.frame();
+    require(!f.auto_y_enabled(), "Manual Y dragging must exit Y auto-fit");
+    f.press_space();
+    require(!f.auto_y_enabled(), "Resume must retain manual Y state");
+    f.toggle_auto_y();
+    f.append_second(20000, 20); f.frame(); f.frame();
+    require(f.auto_y_enabled() && f.state().y.Size() > 30, "Re-enabling must fit newly arriving visible data");
+    f.click(f.legend_point());
+    f.append_second(40000, 100); f.frame(); f.frame();
+    require(f.state().y.Size() < 100, "Hidden signals must not participate in Y auto-fit");
+    std::cout << "PASS default independent Y auto-fit, menu toggle, X preservation, manual Y exit and hidden signal exclusion\n";
+}
+void held_x_zoom_continuously_renders_y_autofit() {
+    Fixture f;
+    auto point = f.x_axis_point();
+    f.move(point); f.right(true); f.move({point.x + 40, point.y});
+    f.append_second(20000, 20);
+    for (int i = 0; i < 4; ++i) f.frame();
+    require(ImGui::IsMouseDown(ImGuiMouseButton_Right) && f.auto_y_enabled(),
+            "X drag must still be held with auto-fit enabled");
+    require(f.rendered_y_tick_extent() > 10,
+            "Rendered Y ticks must expand while X right drag remains held, not only after release");
+    f.append_second(40000, 0.2f);
+    for (int i = 0; i < 4; ++i) f.frame();
+    require(f.rendered_y_tick_extent() < 2,
+            "Rendered Y ticks must also shrink as smaller data becomes visible during a held X drag");
+    f.right(false); f.frame();
+    require(f.auto_y_enabled(), "Release must preserve Y auto-fit");
+    std::cout << "PASS held X right zoom continuously expands and shrinks rendered Y ticks before release\n";
+}
+void overview_context_can_close_and_reopen() {
+    Fixture f;
+    f.toggle_overview();
+    const auto before = f.state();
+    f.move(f.overview_fraction_point(0.5f)); f.right(true); f.right(false); f.frame();
+    require(f.popup_open(), "Right click on overview must open its own menu");
+    auto* popup = GImGui->OpenPopupStack.back().Window;
+    require(popup != nullptr, "Overview popup must be visible");
+    const auto target = ImHashStr("Zoom", 0, popup->IDStack.back());
+    f.move({-1000, -1000});
+    for (int i = 0; i < 5 && GImGui->NavId != target; ++i) f.press_key(ImGuiKey_DownArrow);
+    require(GImGui->NavId == target, "Overview menu must expose the shared Zoom switch");
+    const auto rect = popup->NavRectRel[0];
+    f.click({popup->Pos.x + rect.GetCenter().x, popup->Pos.y + rect.GetCenter().y});
+    f.frame();
+    require(f.overview_window() == nullptr && !f.popup_open(), "Unchecking must close both overview and its popup");
+    require(near(f.state().x.Min, before.x.Min) && near(f.state().x.Max, before.x.Max) &&
+            near(f.state().y.Min, before.y.Min) && near(f.state().y.Max, before.y.Max),
+            "Closing overview must preserve the main plot ranges");
+    f.toggle_overview();
+    require(f.overview_window() != nullptr, "Main window Zoom switch must reflect closure and reopen overview");
+    f.append_second(20000, 1); f.frame();
+    require(near(f.state().x.Max, f.latest_time()), "Overview menu must not freeze live data");
+    std::cout << "PASS overview right-click Zoom switch closes preview and shares state with main menu\n";
+}
+void clearing_buffer_preserves_windows_and_pause() {
+    Fixture f;
+    f.add_window_via_menu();
+    const auto before = f.state();
+    f.clear_buffer_via_menu();
+    require(f.points_drawn() == 0 && f.active_panel_count() == 2,
+            "Clearing must remove samples while preserving all windows");
+    require(near(f.state().x.Size(), before.x.Size()), "Clear must preserve the chosen time span");
+    f.append_second(20000, 1); f.frame(); f.frame();
+    require(f.points_drawn() > 0 && near(f.state().x.Max, f.latest_time()),
+            "Live clear must permit new data to appear without resetting the producer timeline");
+    f.press_space();
+    f.clear_buffer_via_menu();
+    require(f.points_drawn() == 0, "Frozen clear must also discard the shared snapshot");
+    const auto frozen = f.state();
+    f.append_second(40000, 5); f.frame(); f.frame();
+    require(f.points_drawn() == 0 && near(f.state().x.Min, frozen.x.Min),
+            "Clearing while frozen must remain frozen even as the live store receives new data");
+    f.press_space(); f.frame();
+    require(f.points_drawn() > 0 && near(f.state().x.Max, f.latest_time()) && f.active_panel_count() == 2,
+            "Resume after clear must show new live data in the existing windows");
+    std::cout << "PASS shared buffer clear live/frozen, retained windows, continued reception and resume\n";
+}
+void local_clear_keeps_other_windows_and_shared_history() {
+    Fixture f;
+    f.add_window_via_menu();
+    f.select_other_signal();
+    f.press_space();
+    const auto other = f.other_panel_state();
+    const auto before = f.points_drawn();
+    f.clear_buffer_via_menu(true);
+    require(f.points_drawn() > 0 && f.points_drawn() < before,
+            "Local clear must hide only one window while the other still draws the snapshot");
+    require(near(f.other_panel_state().x.Min, other.x.Min) && near(f.other_panel_state().x.Max, other.x.Max),
+            "Local clear must not change other windows even with X linking enabled");
+    f.select_other_signal(); // Hide the second panel to inspect the cleared first panel alone.
+    f.toggle_overview();
+    require(f.points_drawn() == 0, "Local clear must also hide old samples from its overview");
+    f.append_second(20000, 1); f.frame(); f.frame();
+    require(f.points_drawn() == 0, "Locally cleared frozen window must stay empty as data arrives");
+    f.press_space(); f.frame();
+    require(f.points_drawn() > 0 && near(f.state().x.Max, f.latest_time()),
+            "Resume must display samples received after local clear");
+    f.clear_buffer_via_menu(true);
+    require(f.points_drawn() == 0, "Live local clear must immediately hide its history");
+    f.append_second(40000, 1); f.frame(); f.frame();
+    require(f.points_drawn() > 0, "Live local clear must continue displaying new samples");
+    std::cout << "PASS local clear preserves shared history and other windows; filters main/overview and resumes new data\n";
+}
+void new_windows_inherit_linked_x_immediately() {
+    for (bool frozen : {false, true}) {
+        Fixture f;
+        f.move(f.x_axis_point()); f.wheel(3); f.frame();
+        if (frozen) {
+            f.press_space();
+            const auto press = f.x_axis_point();
+            f.move(press); f.left(true); f.move({press.x + 90, press.y}); f.left(false); f.frame();
+        }
+        const auto original = f.state();
+        f.add_window_via_menu();
+        auto added = f.other_panel_state();
+        require(near(added.x.Min, original.x.Min) && near(added.x.Max, original.x.Max),
+                "New linked window must immediately inherit the current zoom and history position");
+        f.select_other_signal();
+        added = f.other_panel_state();
+        require(near(added.x.Min, f.state().x.Min) && near(added.x.Max, f.state().x.Max),
+                "Selecting new signals must preserve inherited X alignment without another axis gesture");
+        f.append_second(20000, 1); f.frame(); f.frame();
+        require(near(f.state().x.Min, f.other_panel_state().x.Min) && near(f.state().x.Max, f.other_panel_state().x.Max),
+                "New windows must remain aligned as data arrives, live or frozen");
+    }
+    Fixture independent;
+    independent.toggle_x_link();
+    independent.move(independent.x_axis_point()); independent.wheel(3); independent.frame();
+    independent.add_window_via_menu();
+    require(near(independent.other_panel_state().x.Size(), 0.2) &&
+            !near(independent.state().x.Size(), independent.other_panel_state().x.Size()),
+            "With linking disabled a new window must retain its independent default span");
+    std::cout << "PASS new linked windows immediately inherit live/frozen X range and retain independent defaults when disabled\n";
+}
+void global_y_autofit_is_a_one_shot_action() {
+    Fixture f;
+    f.add_window_via_menu();
+    f.select_other_signal();
+    f.move(f.press_point()); f.wheel(1); f.frame();
+    f.move(f.other_panel_state().rect.GetCenter()); f.wheel(1); f.frame();
+    require(!f.auto_y_enabled() && !f.other_auto_y_enabled(), "Both panels must start with manual Y");
+    const auto a = f.state().x, b = f.other_panel_state().x;
+    f.enable_all_y_autofit();
+    require(f.auto_y_enabled() && f.other_auto_y_enabled(), "Settings action must enable every existing panel");
+    require(near(f.state().x.Min, a.Min) && near(f.state().x.Max, a.Max) &&
+            near(f.other_panel_state().x.Min, b.Min) && near(f.other_panel_state().x.Max, b.Max),
+            "Batch Y auto-fit must not alter X views");
+    f.move(f.y_axis_point(false)); f.wheel(1); f.frame();
+    require(!f.auto_y_enabled() && f.other_auto_y_enabled(), "Manual Y editing must remain independent after batch action");
+    f.press_space(); f.enable_all_y_autofit();
+    require(f.auto_y_enabled() && f.other_auto_y_enabled(), "Batch action must also work while frozen");
+    const auto frozen = f.state().x;
+    f.append_second(20000, 2); f.frame();
+    require(near(f.state().x.Max, frozen.Max), "Batch action must not resume frozen data");
+    std::cout << "PASS one-shot global Y auto-fit preserves independent controls, X views and frozen state\n";
+}
 void right_drag_zoom_and_anchor() {
     Fixture f;
     const ImVec2 press = f.press_point();
@@ -358,13 +945,9 @@ void right_drag_zoom_and_anchor() {
     std::cout << "PASS drag release suppresses menu and continues live following\n";
 }
 
-void nonlive_right_drag_retains_mouse_anchors(bool paused) {
+void nonlive_right_drag_retains_mouse_anchors() {
     Fixture f;
-    if (paused) {
-        f.press_space();
-    } else {
-        f.view_entire_cache();
-    }
+    f.press_space();
     const auto press = f.press_point();
     f.move(press);
     f.right(true);
@@ -380,7 +963,7 @@ void nonlive_right_drag_retains_mouse_anchors(bool paused) {
             "Non-live right drag must zoom both axes");
     require(near((x_anchor - zoomed.x.Min) / zoomed.x.Size(), x_fraction) &&
             near((y_anchor - zoomed.y.Min) / zoomed.y.Size(), y_fraction),
-            "Paused and history right drags must retain both press-time mouse anchor ratios");
+            "Paused right drags must retain both press-time mouse anchor ratios");
     f.append_second(20'000, 20.0f);
     f.frame();
     const auto held = f.state();
@@ -394,8 +977,7 @@ void nonlive_right_drag_retains_mouse_anchors(bool paused) {
             near(later.y.Min, zoomed.y.Min) && near(later.y.Max, zoomed.y.Max),
             "Non-live right drag must not resume live following while held or after release");
     require(!f.popup_open(), "Non-live right drag must not open a menu on release");
-    std::cout << (paused ? "PASS paused right drag retains both mouse anchors and remains paused\n" :
-                          "PASS history right drag retains both mouse anchors and remains in history\n");
+    std::cout << "PASS paused right drag retains both mouse anchors and remains paused\n";
 }
 
 void live_left_pan_keeps_following() {
@@ -441,10 +1023,9 @@ void live_left_pan_keeps_following() {
     std::cout << "PASS live left pan keeps X following while retaining its Y offset during and after the drag\n";
 }
 
-void nonlive_left_pan_translates_both_axes(bool paused) {
+void nonlive_left_pan_translates_both_axes() {
     Fixture f;
-    if (paused) f.press_space();
-    else f.view_entire_cache();
+    f.press_space();
     const auto press = f.press_point();
     f.move(press);
     f.left(true);
@@ -453,9 +1034,9 @@ void nonlive_left_pan_translates_both_axes(bool paused) {
     f.frame();
     const auto panned = f.state();
     require(panned.x.Max < initial.x.Max - 0.001 && near(panned.x.Size(), initial.x.Size()),
-            "Paused or history left drag must freely translate X without changing its scale");
+            "Paused left drag must freely translate X without changing its scale");
     require(panned.y.Min > initial.y.Min + 0.001 && near(panned.y.Size(), initial.y.Size()),
-            "Paused or history left drag must freely translate Y without changing its scale");
+            "Paused left drag must freely translate Y without changing its scale");
     f.append_second(20'000, 20.0f);
     f.frame();
     const auto held = f.state();
@@ -472,8 +1053,7 @@ void nonlive_left_pan_translates_both_axes(bool paused) {
             near(later.y.Min, panned.y.Min) && near(later.y.Max, panned.y.Max),
             "Released non-live left drag must preserve both ranges instead of resuming live following");
     require(!f.popup_open(), "Non-live left drag must not open a context menu");
-    std::cout << (paused ? "PASS paused left pan freely moves both axes and stays paused\n" :
-                          "PASS history left pan freely moves both axes and stays in history\n");
+    std::cout << "PASS paused left pan freely moves both axes and stays paused\n";
 }
 
 void right_click_opens_menu() {
@@ -584,8 +1164,8 @@ void double_click_freeze_resume_preserves_view(bool interact_while_frozen) {
         require(f.state().x.Size() < before_wheel.x.Size() * 0.99 &&
                 near((anchor - f.state().x.Min) / f.state().x.Size(), fraction),
                 "Wheel after double-click freeze must zoom around the mouse anchor");
-        require(near(f.state().y.Min, before_wheel.y.Min) && near(f.state().y.Max, before_wheel.y.Max),
-                "Default frozen wheel zoom must preserve the manually selected Y range");
+        require(f.state().y.Size() < before_wheel.y.Size(),
+                "Plot wheel must zoom Y as well as X");
     }
     const auto chosen = f.state();
     require(f.points_drawn() > 0, "Frozen view must initially display data from its retained interval");
@@ -605,8 +1185,8 @@ void double_click_freeze_resume_preserves_view(bool interact_while_frozen) {
     const auto resumed = f.state();
     require(near(resumed.x.Max, f.latest_time()) && near(resumed.x.Size(), chosen.x.Size()),
             "Double-click resume must follow the newest sample using the currently selected X span");
-    require(near(resumed.y.Min, chosen.y.Min) && near(resumed.y.Max, chosen.y.Max),
-            "Double-click resume must preserve both Y limits rather than fit the newer taller data");
+    require(interact_while_frozen ? near(resumed.y.Min, chosen.y.Min) && near(resumed.y.Max, chosen.y.Max) : resumed.y.Size() > chosen.y.Size() * 5,
+            "Resume must preserve manual Y or retain enabled auto-fit");
     require(f.points_drawn() > 0, "Resuming must render the newest live data again");
 
     f.append_second(140'000, 40.0f);
@@ -615,8 +1195,8 @@ void double_click_freeze_resume_preserves_view(bool interact_while_frozen) {
     const auto later = f.state();
     require(near(later.x.Max, f.latest_time()) && near(later.x.Size(), chosen.x.Size()),
             "Resumed view must keep following new data at the preserved X span");
-    require(near(later.y.Min, chosen.y.Min) && near(later.y.Max, chosen.y.Max),
-            "Resume must keep Y autofit disabled across later data, even without an earlier manual Y zoom");
+    require(interact_while_frozen ? near(later.y.Min, chosen.y.Min) && near(later.y.Max, chosen.y.Max) : later.y.Size() > resumed.y.Size() * 1.5,
+            "Resume must preserve the prior Y auto-fit setting");
     require(!f.popup_open(), "Double-click freeze and resume must not open a context menu");
     std::cout << (interact_while_frozen ? "PASS double-click freeze retains old data, allows XY pan/right drag/wheel, and resumes at the chosen scale\n" :
                                         "PASS double-click freeze survives ring eviction and resumes without resetting Y\n");
@@ -625,6 +1205,7 @@ void double_click_freeze_resume_preserves_view(bool interact_while_frozen) {
 void double_click_freezes_and_resumes_all_panels() {
     Fixture f;
     f.add_window_via_menu();
+    f.select_other_signal();
     const auto first = f.state();
     const auto second = f.other_panel_state();
     f.double_click(f.press_point());
@@ -670,8 +1251,8 @@ void live_wheel_changes_x_span_and_keeps_following() {
             "X wheel zoom must continue following newly appended data");
     require(near(later.x.Size(), zoomed.x.Size()),
             "Following new data must retain the time span selected by the wheel");
-    require(later.y.Size() > initial.y.Size() * 5.0,
-            "An X-only wheel zoom must preserve Y autofit for later taller data");
+    require(near(later.y.Min, zoomed.y.Min) && near(later.y.Max, zoomed.y.Max),
+            "Plot wheel zoom must preserve its manual Y range for later taller data");
     require(!f.popup_open(), "Wheel zoom must not open a context menu");
     std::cout << "PASS live wheel changes X span and keeps following new data\n";
 }
@@ -679,6 +1260,7 @@ void live_wheel_changes_x_span_and_keeps_following() {
 void y_axis_wheel_keeps_x_following(bool inside_plot) {
     Fixture f;
     f.move(f.y_axis_point(inside_plot));
+    if (inside_plot) ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
     const auto initial = f.state();
     f.wheel(1.0f);
     f.frame();
@@ -700,35 +1282,8 @@ void y_axis_wheel_keeps_x_following(bool inside_plot) {
     require(near(later.y.Min, zoomed.y.Min) && near(later.y.Max, zoomed.y.Max),
             "Y-axis wheel zoom must disable autofit across subsequent taller data");
     require(!f.popup_open(), "Y-axis wheel zoom must not open a context menu");
-    std::cout << (inside_plot ? "PASS wheel inside the Y-axis band changes only Y and keeps X live\n" :
+    std::cout << (inside_plot ? "PASS Ctrl-wheel inside plot changes only Y and keeps X live\n" :
                                "PASS wheel over Y-axis labels changes only Y and keeps X live\n");
-}
-
-void history_wheel_does_not_resume_following() {
-    Fixture f;
-    f.view_entire_cache();
-    f.move(f.press_point());
-    const auto manual = f.state();
-    f.wheel(1.0f);
-    f.frame();
-    const auto zoomed = f.state();
-    require(zoomed.x.Size() < manual.x.Size() * 0.99,
-            "Wheel must still zoom X after the entire-cache menu enters history mode");
-    require(zoomed.x.Max < f.latest_time() - 0.001,
-            "History wheel must retain its mouse anchor rather than lock to the latest sample");
-    require(near(zoomed.y.Min, manual.y.Min) && near(zoomed.y.Max, manual.y.Max),
-            "Default wheel in history mode must leave manual Y limits unchanged");
-
-    f.append_second(20'000, 20.0f);
-    f.frame();
-    f.frame();
-    const auto later = f.state();
-    require(near(later.x.Min, zoomed.x.Min) && near(later.x.Max, zoomed.x.Max),
-            "Wheel in history mode must not restore live following when data arrives");
-    require(near(later.y.Min, zoomed.y.Min) && near(later.y.Max, zoomed.y.Max),
-            "Wheel in history mode must not fit unrelated live data outside the visible interval");
-    require(!f.popup_open(), "History wheel zoom must not open a context menu");
-    std::cout << "PASS wheel preserves history mode selected through the context menu\n";
 }
 
 void frozen_wheel_uses_mouse_anchor_and_resume_keeps_scale() {
@@ -782,75 +1337,72 @@ void frozen_wheel_uses_mouse_anchor_and_resume_keeps_scale() {
     std::cout << "PASS frozen wheel uses the mouse anchor, survives ring eviction, and resumes following at the chosen scale\n";
 }
 
-void frozen_panels_restore_their_own_follow_preferences() {
+void narrow_overview_keeps_true_scale_and_remains_draggable() {
     Fixture f;
-    f.add_window_via_menu();
-    f.view_entire_cache(); // Only the first panel is browsing history.
     f.press_space();
+    f.move(f.press_point());
+    f.wheel(8);
+    f.wheel(8);
+    f.toggle_overview();
+    const auto canvas = f.overview_canvas();
     const auto initial = f.state();
-    const auto other_frozen = f.other_panel_state();
-
-    // The menu-selected history panel remains freely navigable while frozen.
-    const auto press = f.press_point();
+    const double pixels = initial.x.Size() / f.latest_time() * canvas.GetWidth();
+    require(pixels < 5, "Fixture must have a very narrow viewport");
+    require(f.overview_outline_width() <= pixels + 2.01,
+            "Selection outline must follow the real span instead of an 18-pixel minimum");
+    const auto center = [&](PlotState state) {
+        return ImVec2{std::floor(canvas.Min.x + static_cast<float>((state.x.Min + state.x.Max) * 0.5 / f.latest_time()) * canvas.GetWidth()),
+                      std::floor(canvas.GetCenter().y)};
+    };
+    auto press = center(initial);
     f.move(press);
     f.left(true);
-    f.move({press.x + 80.0f, press.y + 30.0f});
+    f.move({press.x - 20, press.y});
     f.left(false);
     f.frame();
-    require(f.state().x.Max < initial.x.Max - 0.001 && f.points_drawn() > 0,
-            "A frozen history panel must remain freely pannable over its retained samples");
-    const auto zoom_press = f.press_point();
-    f.move(zoom_press);
-    f.right(true);
-    f.move({zoom_press.x + 60.0f, zoom_press.y - 35.0f});
-    f.right(false);
+    const auto moved = f.state();
+    require(moved.x.Min < initial.x.Min && near(moved.x.Size(), initial.x.Size()),
+            "A narrow frozen selection must still move without resizing");
+    f.move(center(moved));
+    f.wheel(8);
+    f.wheel(8);
     f.frame();
-    const auto chosen = f.state();
-
-    for (std::uint64_t second = 1; second <= 6; ++second)
-        f.append_second(second * 20'000, 30.0f);
-    f.frame();
-    f.frame();
-    require(f.points_drawn() > 0 && near(f.state().x.Min, chosen.x.Min) && near(f.state().x.Max, chosen.x.Max),
-            "Detached frozen panel must retain its inspected data after the live ring wraps");
-    require(near(f.other_panel_state().x.Min, other_frozen.x.Min) &&
-            near(f.other_panel_state().x.Max, other_frozen.x.Max),
-            "A panel that prefers following must also stop moving while the buffer is frozen");
-
-    // Double click now restores global buffer updates. The first panel keeps
-    // its menu-selected history range; the other resumes its existing follow.
-    f.double_click(f.press_point());
-    const auto restored = f.state();
-    require(near(restored.x.Min, chosen.x.Min) && near(restored.x.Max, chosen.x.Max) &&
-            near(restored.y.Min, chosen.y.Min) && near(restored.y.Max, chosen.y.Max),
-            "Restoring buffer updates must retain a detached panel's complete inspected range");
-    // The second panel has no selected signal, so zero total plotted points
-    // here proves that the first panel stopped using its retained snapshot.
-    require(f.points_drawn() == 0,
-            "Restored detached panel must read the live ring where its old interval has expired");
-    const auto other_restored = f.other_panel_state();
-    require(near(other_restored.x.Max, f.latest_time()) && near(other_restored.x.Size(), other_frozen.x.Size()),
-            "Restoring updates must resume only the other panel's existing following preference");
-
-    // A subsequent double click freezes a fresh shared snapshot. Space must
-    // operate on that same global frozen state rather than an independent one.
-    f.double_click(f.press_point());
-    const auto refrozen_other = f.other_panel_state();
-    f.append_second(140'000, 40.0f);
-    f.frame();
-    f.frame();
-    require(near(f.other_panel_state().x.Min, refrozen_other.x.Min) &&
-            near(f.other_panel_state().x.Max, refrozen_other.x.Max),
-            "A second double click must freeze updates for the other following panel again");
-    f.press_space();
-    require(near(f.state().x.Min, chosen.x.Min) && near(f.state().x.Max, chosen.x.Max) &&
-            near(f.other_panel_state().x.Max, f.latest_time()),
-            "Space and double click must share global freezing while preserving independent follow preferences");
-    std::cout << "PASS double click and Space freeze/restore globally while retaining history and following preferences\n";
+    const auto tiny = f.state();
+    require(tiny.x.Size() < moved.x.Size() && f.overview_outline_width() <= 3.01f,
+            "Subpixel viewports must collapse to a hairline and continue zooming");
+    f.click(f.overview_fraction_point(0.4f));
+    require(near(f.state().x.Size(), tiny.x.Size()) && f.state().x.Min < tiny.x.Min,
+            "Clicking outside a tiny frozen selection must relocate it without inflating its span");
+    require(near(f.state().y.Min, initial.y.Min) && near(f.state().y.Max, initial.y.Max),
+            "Overview fine navigation must not change Y");
+    std::cout << "PASS narrow overview uses true-width outline, moves, zooms to a hairline and relocates\n";
 }
-
+void overview_tracks_selected_channels() {
+    Fixture f({{"Sine", "V"}, {"Second", "A"}});
+    f.toggle_overview();
+    const ImVec4 first{0.94f, 0.20f, 0.18f, 0.55f};
+    const ImVec4 second{0.25f, 0.65f, 0.98f, 0.55f};
+    require(f.overview_has_color(first) && !f.overview_has_color(second),
+            "Overview must initially render only the selected channel");
+    f.toggle_channel(1);
+    f.require_unitless_legend();
+    require(f.overview_has_color(first) && f.overview_has_color(second),
+            "Adding a channel must render both signal colors in the open overview");
+    f.press_space();
+    f.toggle_channel(0);
+    require(!f.overview_has_color(first) && f.overview_has_color(second),
+            "Frozen overview must also follow channel deselection");
+    f.toggle_channel(1);
+    require(!f.overview_has_color(first) && !f.overview_has_color(second),
+            "No selected channels must leave no stale preview curves");
+    f.toggle_channel(0);
+    require(f.overview_has_color(first) && !f.overview_has_color(second),
+            "Reselecting a channel must restore its frozen preview");
+    std::cout << "PASS overview synchronizes all selected channels live and frozen; legends omit units\n";
+}
 void overview_entry_and_live_span_preserve_following() {
     Fixture f;
+    f.toggle_x_link();
     f.add_window_via_menu();
     require(f.overview_window() == nullptr, "Zoom overview must be closed by default");
     // Establish manual Y limits while retaining live following, so the test
@@ -864,11 +1416,11 @@ void overview_entry_and_live_span_preserve_following() {
     const auto initial = f.state();
     const auto other_initial = f.other_panel_state();
     f.toggle_overview();
-    require(f.overview_window() != nullptr, "Clicking Zoom must open its own overview child");
+    require(f.overview_window() != nullptr, "Clicking the Zoom menu item must open its own overview child");
     require(GImPlot->Plots.GetAliveCount() == 2, "Overview preview must not create another ImPlot plot");
     require(near(f.state().x.Min, initial.x.Min) && near(f.state().x.Max, initial.x.Max) &&
             near(f.state().y.Min, initial.y.Min) && near(f.state().y.Max, initial.y.Max),
-            "Clicking the Zoom entry must not pan or reset the main plot");
+            "Clicking the Zoom menu item must not pan or reset the main plot");
 
     f.click(f.overview_fraction_point(0.60f));
     const auto clicked = f.state();
@@ -907,7 +1459,7 @@ void overview_entry_and_live_span_preserve_following() {
             "Double clicking an overview must not bubble into the main plot's global freeze gesture");
     const auto before_close = f.state();
     f.toggle_overview();
-    require(f.overview_window() == nullptr, "Clicking Zoom again must close the overview");
+    require(f.overview_window() == nullptr, "Clicking the Zoom menu item again must close the overview");
     require(near(f.state().x.Min, before_close.x.Min) && near(f.state().x.Max, before_close.x.Max) &&
             near(f.state().y.Min, before_close.y.Min) && near(f.state().y.Max, before_close.y.Max),
             "Closing the overview must retain the selected main-plot ranges");
@@ -917,6 +1469,8 @@ void overview_entry_and_live_span_preserve_following() {
 
 void frozen_overview_moves_resizes_and_isolates_input() {
     Fixture f;
+    f.toggle_auto_y();
+    f.toggle_x_link();
     f.add_window_via_menu();
     const double extent_end = f.latest_time();
     f.press_space();
@@ -1014,12 +1568,160 @@ void held_space_toggles_freeze_only_once() {
 
 int main() {
     try {
+        {
+            wave::SignalHub hub;
+            auto& audio=hub.register_source("audio","Audio",20000,{{"Audio","","a"}},false);
+            auto& cpu=hub.register_source("cpu","CPU",10,{{"CPU","","c"}},false);
+            audio.online=cpu.online=true; cpu.offset=7;
+            std::vector<float> samples(20000,1), slow(10,2);
+            audio.data->append(0,samples); cpu.data->append(0,slow);
+            Fixture f({{"Sine","V"}},&hub);
+            require(near(f.state().x.Max,0.99995), "Unselected later source must not push live audio away from right edge");
+            f.toggle_channel(1); f.frame();
+            require(near(f.state().x.Max,7.9), "Selected live sources must retain common timeline alignment");
+            cpu.online=false; f.frame();
+            require(near(f.state().x.Max,0.99995), "Disconnected source must not drive a selected live stream");
+            audio.data->append(20000,samples); f.frame();
+            require(near(f.state().x.Max,1.99995), "Remaining live stream must continue following its own newest data");
+            std::cout << "PASS live following ignores unselected and disconnected later sources\n";
+        }
+        {
+            Fixture f;
+            auto before=f.state();
+            f.middle_double_click(f.press_point());
+            require(near(f.state().x.Size(),before.x.Size()), "Auto must be disabled while live");
+            f.add_window_via_menu(); f.select_other_signal();
+            f.press_space(); f.toggle_auto_y();
+            before=f.state(); const auto other_y=f.other_panel_state().y;
+            const auto point=f.press_point();
+            f.middle_double_click(point);
+            const auto after=f.state();
+            require(near(after.x.Min,1.0/20000) && near(after.x.Max,f.latest_time()), "Auto must show the complete frozen buffer regardless of cursor position");
+            require(after.y.Min < -0.9 && after.y.Max > 0.9 && !f.auto_y_enabled(), "Auto must fit Y once without enabling persistent auto-fit");
+            require(near(f.other_panel_state().x.Min,after.x.Min) && near(f.other_panel_state().y.Min,other_y.Min), "Auto must link only X");
+            f.append_second(40000,50); f.frame();
+            require(near(f.state().x.Max,after.x.Max) && near(f.state().y.Max,after.y.Max), "Auto must keep the view frozen");
+            std::cout << "PASS frozen middle-double Auto: full buffer, one-shot Y, X link and live exclusion\n";
+        }
+        {
+            Fixture f;
+            f.add_window_via_menu(); f.select_other_signal();
+            auto before=f.state();
+            auto start=ImVec2{before.rect.Min.x+before.rect.GetWidth()*0.2f,before.rect.Min.y+before.rect.GetHeight()*0.25f};
+            auto end=ImVec2{before.rect.Min.x+before.rect.GetWidth()*0.7f,before.rect.Min.y+before.rect.GetHeight()*0.75f};
+            f.move(start); f.middle(true); f.move(end); f.middle(false);
+            require(near(f.state().x.Size(),before.x.Size()), "Live middle drag must not zoom or pause");
+            f.press_space(); before=f.state(); const auto other_y=f.other_panel_state().y;
+            start={before.rect.Min.x+before.rect.GetWidth()*0.2f,before.rect.Min.y+before.rect.GetHeight()*0.25f};
+            end={before.rect.Min.x+before.rect.GetWidth()*0.7f,before.rect.Min.y+before.rect.GetHeight()*0.75f};
+            start={std::floor(start.x),std::floor(start.y)};
+            end={std::floor(end.x),std::floor(end.y)};
+            // Reverse direction must select the same rectangle; no zoom before release.
+            f.move(end); f.middle(true); f.move(start);
+            require(near(f.state().x.Min,before.x.Min), "Box selection must preview without changing axes");
+            f.middle(false); f.frame();
+            auto after=f.state();
+            const auto expected_x=[&](float pixel){return before.x.Min+(pixel-before.rect.Min.x)/before.rect.GetWidth()*before.x.Size();};
+            const auto expected_y=[&](float pixel){return before.y.Max-(pixel-before.rect.Min.y)/before.rect.GetHeight()*before.y.Size();};
+            require(near(after.x.Min,expected_x(start.x)) && near(after.x.Max,expected_x(end.x)), "Middle box must zoom to selected X bounds");
+            require(near(after.y.Min,expected_y(end.y)) && near(after.y.Max,expected_y(start.y)), "Middle box must zoom to selected Y bounds");
+            require(!f.auto_y_enabled() && near(f.other_panel_state().x.Min,after.x.Min) && near(f.other_panel_state().y.Min,other_y.Min), "Box zoom must leave Y auto-fit and link only X");
+            f.append_second(40000,10); f.frame();
+            require(near(f.state().x.Max,after.x.Max), "Box zoom must remain frozen");
+            const auto center=f.state().rect.GetCenter();
+            f.move(center); f.middle(true); f.move({center.x+1,center.y+1}); f.middle(false);
+            require(near(f.state().x.Size(),after.x.Size()), "Tiny middle drag must not zoom");
+            for(int i=0;i<32;++i) f.frame(); // A separate drag, not a middle double click.
+            f.move(center); f.middle(true); f.move({center.x+30,center.y+30}); f.press_key(ImGuiKey_Escape); f.middle(false);
+            require(near(f.state().x.Size(),after.x.Size()) && !f.popup_open(), "Escape cancels box selection without opening menus");
+            std::cout << "PASS frozen middle rectangle: reverse direction, release-only XY zoom, linked X, manual Y, tiny drag and Escape\n";
+        }
+        {
+            wave::SignalHub hub;
+            auto& a=hub.register_source("slow","Slow",10,{{"Slow value","","value"}},false);
+            auto& b=hub.register_source("fast","Fast",1000,{{"Fast value","","value"}},false);
+            a.online=b.online=true; a.anchored=b.anchored=true;
+            std::vector<float> slow(10,1), fast(1000,2);
+            a.data->append(0,slow); b.data->append(0,fast);
+            Fixture f({{"Sine","V"}},&hub);
+            f.toggle_channel(1); f.frame();
+            require(f.points_drawn()>10 && near(f.state().x.Max,0.999), "Mixed sources must share live plot time");
+            f.add_window_via_menu(); f.select_other_signal(); f.frame();
+            require(near(f.state().x.Max,f.other_panel_state().x.Max), "Different rates must follow a shared X playhead");
+            f.press_space(); const auto frozen=f.state().x;
+            a.data->append(10,slow); b.data->append(1000,fast); f.frame();
+            require(near(f.state().x.Max,frozen.Max), "All source snapshots must freeze together");
+            a.data->clear_channel(0); f.frame();
+            require(f.points_drawn()>0, "Clearing one source must retain another source's frozen data");
+            f.press_space(); f.frame();
+            require(near(f.state().x.Max,1.999), "Resume must follow newest shared time");
+            f.clear_buffer_via_menu(true); f.frame();
+            const float one=3;
+            a.data->append(20,std::span<const float>(&one,1));
+            b.data->append(2000,std::span<const float>(&one,1)); f.frame();
+            require(f.points_drawn()>0, "Local clear must use each source's own sequence cutoff");
+            std::cout << "PASS mixed sources in windows: shared X, atomic pause, scoped clear and resume\n";
+        }
+        {
+            Fixture f;
+            f.register_receiver_timed();
+            require(near(f.state().x.Max,1.2) && std::isfinite(f.state().y.Min) && f.points_drawn()>0,
+                    "Irregular points must render with actual times and finite axes");
+            f.move(f.press_point()); f.right(true); f.right(false); f.frame();
+            const auto online_height=GImGui->OpenPopupStack.back().Window->Size.y;
+            f.source_online(false); f.frame(); f.frame();
+            require(GImGui->OpenPopupStack.back().Window->Size.y<online_height,
+                    "Disconnected signals must disappear from the selection menu");
+            require(f.points_drawn()>0 && near(f.state().x.Max,1.2), "Disconnect must preserve visible history");
+            f.source_online(true); f.frame(); f.frame();
+            require(near(GImGui->OpenPopupStack.back().Window->Size.y,online_height), "Reconnect must remove disconnected status");
+            std::cout << "PASS receiver time view and disconnected/reconnected menu status\n";
+        }
+        batched_display_is_continuous_and_freezes();
+        {
+            Fixture f;
+            f.toggle_channel(0);
+            const auto empty = f.state();
+            f.append_second(40000, 1.0f); f.frame();
+            require(near(f.state().x.Min, empty.x.Min) && near(f.state().x.Max, empty.x.Max),
+                    "Deselecting the last channel must stop automatic X scrolling");
+            f.toggle_channel(0);
+            require(near(f.state().x.Max, f.latest_time()),
+                    "Selecting a channel must restore live X following");
+        }
+        {
+            Fixture f;
+            f.press_space();
+            require(f.points_drawn()>0, "Frozen view must initially contain data");
+            f.clear_channel_from_source(0);
+            require(f.points_drawn()==0, "Remote channel clear must hide old frozen data too");
+            f.append_second(40000, 1.0f); f.frame();
+            require(f.points_drawn()==0, "Remote clear must preserve freeze state");
+            f.press_space();
+            require(f.points_drawn()>0, "Resume must show only new channel data");
+        }
+        {
+            Fixture f; f.toggle_channel(0); f.register_external_channels();
+            require(f.points_drawn()==0, "Metadata/data arrival must not select channels");
+            f.toggle_channel(1);
+            require(f.points_drawn()>0, "Dynamically registered channel must be selectable");
+        }
+        remove_windows_and_recreate();
+        paused_x_link_is_global_and_optional();
+        axis_label_drag_and_wheel();
+        live_x_link_tracks_zoom_and_new_data();
+        axis_right_drag_locks_axis_and_keeps_arrow();
+        independent_y_autofit_and_manual_override();
+        held_x_zoom_continuously_renders_y_autofit();
+        overview_context_can_close_and_reopen();
+        clearing_buffer_preserves_windows_and_pause();
+        local_clear_keeps_other_windows_and_shared_history();
+        new_windows_inherit_linked_x_immediately();
+        global_y_autofit_is_a_one_shot_action();
         right_drag_zoom_and_anchor();
-        nonlive_right_drag_retains_mouse_anchors(true);
-        nonlive_right_drag_retains_mouse_anchors(false);
+        nonlive_right_drag_retains_mouse_anchors();
         live_left_pan_keeps_following();
-        nonlive_left_pan_translates_both_axes(true);
-        nonlive_left_pan_translates_both_axes(false);
+        nonlive_left_pan_translates_both_axes();
         right_click_opens_menu();
         returning_to_press_point_still_suppresses_menu();
         legend_click_hides_signal_without_panning();
@@ -1030,9 +1732,9 @@ int main() {
         live_wheel_changes_x_span_and_keeps_following();
         y_axis_wheel_keeps_x_following(false);
         y_axis_wheel_keeps_x_following(true);
-        history_wheel_does_not_resume_following();
         frozen_wheel_uses_mouse_anchor_and_resume_keeps_scale();
-        frozen_panels_restore_their_own_follow_preferences();
+        narrow_overview_keeps_true_scale_and_remains_draggable();
+        overview_tracks_selected_channels();
         overview_entry_and_live_span_preserve_following();
         frozen_overview_moves_resizes_and_isolates_input();
         held_space_toggles_freeze_only_once();

@@ -154,10 +154,16 @@ try {
             (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
             (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
         )
-        Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib')
+        Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'ws2_32.lib')
+        Link-MsvcExecutable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
+        Link-MsvcExecutable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
     }
 
     if (-not $SkipTests) {
+        $tcpTest = Join-Path $buildDirectory 'tcp_source_tests.exe'
+        Link-MsvcExecutable $tcpTest @($coreObject, (Build-MsvcObject 'tests/tcp_source_tests.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
+        & $tcpTest
+        if ($LASTEXITCODE -ne 0) { throw 'TCP source tests failed.' }
         $testObjects = @($coreObject, (Build-MsvcObject 'tests/data_core_tests.cpp'))
         $testExecutable = Join-Path $buildDirectory 'data_core_tests.exe'
         Link-MsvcExecutable $testExecutable $testObjects @('/SUBSYSTEM:CONSOLE')
