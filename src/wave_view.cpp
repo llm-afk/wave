@@ -23,6 +23,7 @@ constexpr std::array<ImVec4, 8> signal_colors = {{
     {1.00f, 0.60f, 0.267f, 1}, {0.77f, 0.81f, 0.86f, 1}
 }};
 constexpr float line_alpha = 0.60f;
+constexpr float stroke_width_dip = 1.25f;
 constexpr float full_marker_alpha = 0.95f;
 constexpr double hidden_spacing_diameters = 0.75;
 constexpr double resolved_spacing_diameters = 3.0;
@@ -34,6 +35,91 @@ float marker_visibility(double interval, double seconds_per_diameter) {
     const float t = static_cast<float>(std::clamp((spacing - hidden_spacing_diameters) /
         (resolved_spacing_diameters - hidden_spacing_diameters), 0.0, 1.0));
     return t * t * (3.0f - 2.0f * t);
+}
+
+// Each column receives the vertical travel and extent of this trace in screen pixels.
+// A monotone slope (even a very steep one) visits each height once. Repeated sweeps
+// through the same heights within one stroke footprint would blend repeatedly.
+struct StrokeExtent {
+    double travel = 0, low = std::numeric_limits<double>::infinity(), high = -low;
+    void include(const StrokeExtent& other) {
+        travel += other.travel;
+        low = std::min(low, other.low);
+        high = std::max(high, other.high);
+    }
+};
+
+void set_stroke_colors(std::span<const PlotPoint> samples, ImPlotSpec& spec, PlotRange range,
+                       ImVec2 size, std::vector<StrokeExtent>& columns, std::vector<ImU32>& colors) {
+    spec.LineColors = nullptr;
+    if (samples.size() < 3) return;
+    const double stroke_pixels = std::max(1.0f, spec.LineWeight);
+    const auto count = static_cast<std::size_t>(std::ceil(size.x / stroke_pixels));
+    if (count == 0) return;
+    const double span = range.x.max - range.x.min;
+    const double footprint_seconds = span / size.x * (3 * stroke_pixels);
+    if (std::adjacent_find(samples.begin(), samples.end(), [&](const PlotPoint& a, const PlotPoint& b) {
+            return b.t - a.t < footprint_seconds;
+        }) == samples.end()) return;
+    const double width = size.x / stroke_pixels;
+    const auto x_column = [&](double t) { return (t - range.x.min) / span * width; };
+    if (!std::isfinite(x_column(samples.front().t)) || !std::isfinite(x_column(samples.back().t))) return;
+    columns.assign(count, {});
+    const auto column_at = [&](double x) {
+        return static_cast<std::size_t>(std::clamp(x, 0.0, double(count - 1)));
+    };
+    const auto y_pixel = [&](double value) {
+        return std::clamp((value - range.y.min) / (range.y.max - range.y.min) * size.y,
+            -std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
+    };
+    double x0 = x_column(samples.front().t), y0 = y_pixel(samples.front().value);
+    for (const auto& p : samples.subspan(1)) {
+        const double x1 = x_column(p.t), y1 = y_pixel(p.value);
+        if (x1 >= 0 && x0 < width) {
+            const auto height_at = [&](double edge, double vertical_end) {
+                const double y = x1 > x0 ? std::lerp(y0, y1, std::clamp((edge - x0) / (x1 - x0), 0.0, 1.0)) : vertical_end;
+                return std::clamp(y, 0.0, double(size.y));
+            };
+            const auto first = column_at(x0), last = column_at(x1);
+            double a = height_at(double(first), y0);
+            for (auto col = first; col <= last; ++col) {
+                const double b = height_at(double(col + 1), y1);
+                if (a != b) columns[col].include({std::abs(b - a), std::min(a, b), std::max(a, b)});
+                a = b;
+            }
+        }
+        x0 = x1;
+        y0 = y1;
+    }
+    colors.resize(samples.size());
+    // Include adjacent columns for antialiasing. Reuse the color for segments of
+    // the same trace that land in the same column.
+    std::size_t previous = count;
+    ImU32 ink = ImGui::GetColorU32(spec.LineColor);
+    x0 = x_column(samples.front().t);
+    for (std::size_t i = 0; i + 1 < samples.size(); ++i) {
+        const double x1 = x_column(samples[i + 1].t);
+        const auto col = column_at(std::lerp(x0, x1, .5));
+        if (col != previous) {
+            StrokeExtent footprint = columns[col];
+            if (col > 0) footprint.include(columns[col - 1]);
+            if (col + 1 < count) footprint.include(columns[col + 1]);
+            auto color = spec.LineColor;
+            const double height = footprint.high - footprint.low;
+            if (footprint.travel > 0 && footprint.travel > height) {
+                // The footprint spans three stroke widths. The AA edges contribute
+                // fractional coverage, so each extra traversal counts proportionally.
+                const double passes = 1 + (footprint.travel - height) / (3 * (height + stroke_pixels));
+                color.w = static_cast<float>(1 - std::pow(1 - line_alpha, 1 / passes));
+            }
+            ink = ImGui::GetColorU32(color);
+            previous = col;
+        }
+        colors[i] = ink;
+        x0 = x1;
+    }
+    colors.back() = ink;
+    spec.LineColors = colors.data();
 }
 
 void draw_sample_markers(std::span<const PlotPoint> samples, double rate, double seconds_per_pixel,
@@ -145,6 +231,8 @@ struct WaveView::Impl {
     double capacity_seconds = infinity;
     bool automatic_span = true;
     std::vector<bool> visible;
+    std::vector<StrokeExtent> stroke_columns;
+    std::vector<ImU32> stroke_colors;
     std::size_t points = 0;
     ImVec2 plot_pos{}, plot_size{}, frame_pos{}, frame_size{};
     ImVec2 legend_pos{}, legend_size{};
@@ -475,7 +563,7 @@ struct WaveView::Impl {
                 ImPlotSpec spec;
                 spec.LineColor = color;
                 spec.LineColor.w = line_alpha;
-                spec.LineWeight = dpi;
+                spec.LineWeight = stroke_width_dip * dpi;
                 spec.Marker = ImPlotMarker_None;
                 spec.Stride = sizeof(PlotPoint);
                 const auto label = store.label(i) + "###channel" + std::to_string(i);
@@ -492,6 +580,7 @@ struct WaveView::Impl {
                     while (end < samples.size() && std::isfinite(samples[end].value)) ++end;
                     if (end > begin) {
                         const auto run = std::span(samples).subspan(begin, end - begin);
+                        set_stroke_colors(run, spec, limits, size, stroke_columns, stroke_colors);
                         ImPlot::PlotLine(label.c_str(), &run.front().t, &run.front().value,
                             static_cast<int>(run.size()), spec);
                         draw_sample_markers(run, rate, seconds_per_pixel, dpi, color);

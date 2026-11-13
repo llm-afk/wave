@@ -153,15 +153,15 @@ bool finite(wave::AxisRange range) {
 void direction_and_anchor() {
     const wave::PlotRange initial{{-2, 8}, {-10, 10}};
     const wave::ZoomAnchor anchor{1, 4};
-    const auto zoomed = wave::zoom_from_drag(initial, anchor, 150, -90);
+    const auto zoomed = wave::zoom_from_drag(initial, anchor, -150, 90);
     require(span(zoomed.x) < span(initial.x) && span(zoomed.y) < span(initial.y),
-            "Right/up dragging must zoom into X/Y");
+            "Left/down dragging must zoom into X/Y");
     require(near(fraction(initial.x, anchor.x), fraction(zoomed.x, anchor.x)) &&
             near(fraction(initial.y, anchor.y), fraction(zoomed.y, anchor.y)),
             "The pressed data anchor must keep its viewport position");
-    const auto expanded = wave::zoom_from_drag(initial, anchor, -150, 90);
+    const auto expanded = wave::zoom_from_drag(initial, anchor, 150, -90);
     require(span(expanded.x) > span(initial.x) && span(expanded.y) > span(initial.y),
-            "Left/down dragging must zoom out of X/Y");
+            "Right/up dragging must zoom out of X/Y");
     require(near(span(zoomed.x) * span(expanded.x), span(initial.x) * span(initial.x)),
             "Opposite drag distances must produce reciprocal exponential scales");
 }
@@ -189,9 +189,9 @@ void extreme_deltas_and_limits() {
     wave::DragZoomLimits limits;
     limits.max_x_span = 120;
     limits.max_y_span = 500;
-    const auto zoomed = wave::zoom_from_drag(initial, anchor, 1e308, -1e308,
+    const auto zoomed = wave::zoom_from_drag(initial, anchor, -1e308, 1e308,
                                             wave::ZoomAxes::Both, limits);
-    const auto expanded = wave::zoom_from_drag(initial, anchor, -1e308, 1e308,
+    const auto expanded = wave::zoom_from_drag(initial, anchor, 1e308, -1e308,
                                               wave::ZoomAxes::Both, limits);
     require(finite(zoomed.x) && finite(zoomed.y) && finite(expanded.x) && finite(expanded.y),
             "Extreme mouse deltas must always produce finite, ordered bounds");
@@ -216,14 +216,14 @@ void extreme_deltas_and_limits() {
 void zoom_has_no_minimum_scale() {
     const wave::PlotRange initial{{54, 56}, {-.01, .03}};
     const wave::ZoomAnchor anchor{55.2, .007};
-    const auto small = wave::zoom_from_drag(initial, anchor, 3000, -3000);
-    const auto smaller = wave::zoom_from_drag(small, anchor, 100, -100);
+    const auto small = wave::zoom_from_drag(initial, anchor, -3000, 3000);
+    const auto smaller = wave::zoom_from_drag(small, anchor, -100, 100);
     require(finite(small.x) && finite(small.y) && span(small.x) < 1.0 / 20'000 && span(small.y) < 1e-6,
             "X must zoom below one sample interval and Y below its former fixed minimum");
     require(span(smaller.x) < span(small.x) && span(smaller.y) < span(small.y),
             "Zoom must continue shrinking below both former minimum scales");
     const wave::PlotRange tiny{{0, 1e-200}, {0, 1e-200}};
-    const auto tinier = wave::zoom_from_drag(tiny, {0, 0}, 180, -180);
+    const auto tinier = wave::zoom_from_drag(tiny, {0, 0}, -180, 180);
     require(finite(tinier.x) && finite(tinier.y) && span(tinier.x) < span(tiny.x) && span(tinier.y) < span(tiny.y),
             "Valid tiny coordinate ranges must not be inflated to a fixed numerical floor");
 }
@@ -350,7 +350,7 @@ void sample_markers_follow_horizontal_zoom() {
     for (int direction : {-1, 1}) {
         int previous = alpha(true), intermediate_steps = 0;
         for (int tick = 0; tick < 10; ++tick) {
-            ImGui::GetIO().AddMouseWheelEvent(0, static_cast<float>(direction));
+            ImGui::GetIO().AddMouseWheelEvent(0, static_cast<float>(-direction));
             f.frame();
             const int current = alpha(true);
             const int change = (current - previous) * direction;
@@ -426,6 +426,36 @@ void irregular_sample_markers_respect_bursts() {
     require(marker_near(2) == full_marker_alpha8,
         "A single sample must stay visible before there is a second point to connect");
     std::cout << "PASS markers for isolated readings and the first sample of an irregular stream\n";
+}
+
+void overlap_compensation_is_local_to_the_trace() {
+    wave::SignalHub hub;
+    Fixture f(&hub, false, {.time_span = 1, .y_min = -2, .y_max = 2});
+    auto& source = hub.register_source("input", "Input", 50'000,
+        {{"Burst", "V", "burst"}, {"Ramp", "V", "ramp"}}, false);
+    source.online = true;
+    std::vector<float> data(50'000 * 2);
+    for (std::size_t i = 0; i < 50'000; ++i) {
+        const float ramp = static_cast<float>(i) / 50'000 - .5f;
+        data[2 * i] = i < 25'000 ? ramp : (i % 2 ? 1.0f : -1.0f);
+        data[2 * i + 1] = ramp;
+    }
+    source.data->append(0, data);
+    for (bool paused : {false, true}) {
+        f.view->set_paused(paused);
+        f.frame();
+        const auto rect = f.state().rect;
+        auto& items = GImPlot->Plots.TryGetMapData(0)->Items;
+        const auto ink = [&](int channel, float x) {
+            const ImRect area{{rect.Min.x + x * rect.GetWidth(), rect.Min.y + 15},
+                              {rect.Min.x + (x + .1f) * rect.GetWidth(), rect.Max.y - 15}};
+            return rendered_alpha(area, items.GetItemByIndex(channel)->Color, false);
+        };
+        const int burst = ink(0, .7f);
+        require(burst > 0 && burst < trace_alpha8 && ink(0, .2f) == trace_alpha8 && ink(1, .7f) == trace_alpha8,
+            "Only retraced pixels may reduce line opacity, including inside a paused mixed-density view");
+    }
+    std::cout << "PASS local opacity compensation for a dense burst beside two resolved ramps\n";
 }
 
 void default_view_fills_then_scrolls() {
@@ -547,7 +577,7 @@ void auto_y_tracks_visible_amplitudes() {
         "The remaining visible signal must occupy 80 percent after hiding a channel");
     auto plot = f.state();
     f.move({plot.rect.GetCenter().x, plot.rect.Max.y + 4});
-    ImGui::GetIO().AddMouseWheelEvent(0, 1);
+    ImGui::GetIO().AddMouseWheelEvent(0, -1);
     f.frame();
     source.data->append(3, std::vector<float>{50, 200});
     f.frame();
@@ -674,7 +704,7 @@ void wheel_zoom_regions() {
         ImGui::GetIO().AddMouseWheelEvent(0, 1);
         f.frame();
         auto after = f.state();
-        const double scale = std::exp(-35.0 / 180);
+        const double scale = std::exp(35.0 / 180);
         require(near(after.x.Size(), before.x.Size() * (axis == 2 ? 1 : scale)),
             "Wheel must change X only over X labels or the plot");
         require(near(after.y.Size(), before.y.Size() * (axis == 1 ? 1 : scale)),
@@ -707,9 +737,9 @@ void horizontal_scroll_zooms_time() {
     f.move(before.rect.GetCenter());
     wheel(-.25f, .05f);
     auto after = f.state();
-    require(near(after.x.Size(), before.x.Size() * std::exp(-.25 * 35 / 180)) &&
+    require(near(after.x.Size(), before.x.Size() * std::exp(.25 * 35 / 180)) &&
             near(after.x.Max, before.x.Max) && after.y.Min == before.y.Min && after.y.Max == before.y.Max,
-        "Fractional scroll-right over the trace must shorten only the time span and keep the live edge");
+        "Fractional scroll-right over the trace must expand only the time span and keep the live edge");
     wheel(0, .05f);
     require(near(f.state().x.Min, after.x.Min) && f.state().y.Size() == before.y.Size(),
         "A separate vertical tail from the horizontal gesture must not zoom Y");
@@ -725,9 +755,9 @@ void horizontal_scroll_zooms_time() {
     const double cursor_time = before.x.Min + fraction * before.x.Size();
     wheel(.5f, 0);
     after = f.state();
-    require(after.x.Size() > before.x.Size() && near(after.x.Min + fraction * after.x.Size(), cursor_time) &&
+    require(after.x.Size() < before.x.Size() && near(after.x.Min + fraction * after.x.Size(), cursor_time) &&
             after.y.Min == before.y.Min && after.y.Max == before.y.Max && f.view->paused(),
-        "Scroll-left over the time axis must expand paused time around the cursor");
+        "Scroll-left over the time axis must magnify paused time around the cursor");
     wheel(-.5f, 0);
     require(near(f.state().x.Min, before.x.Min) && near(f.state().x.Max, before.x.Max),
         "Opposite fractional scroll must recover the paused range");
@@ -760,13 +790,13 @@ void horizontal_scroll_zooms_time() {
     wheel(-.25f, 0);
     const auto before_notch = f.state();
     wheel(0, 1);
-    require(f.state().y.Size() < before_notch.y.Size() && f.state().x.Size() < before_notch.x.Size(),
+    require(f.state().y.Size() > before_notch.y.Size() && f.state().x.Size() > before_notch.x.Size(),
         "A normal vertical wheel notch after a horizontal swipe must still zoom both axes over the trace");
     wheel(-.25f, 0);
     for (int i = 0; i < 12; ++i) f.frame();
     const auto before_vertical = f.state();
     wheel(0, .25f);
-    require(f.state().y.Size() < before_vertical.y.Size(),
+    require(f.state().y.Size() > before_vertical.y.Size(),
         "Independent fractional vertical input must be accepted once the horizontal swipe has ended");
     std::cout << "PASS horizontal touchpad zoom, fractional input, paused cursor anchor, input scope and automatic Y\n";
 }
@@ -784,9 +814,9 @@ void right_drag_zoom_regions() {
         // Starting on axis labels locks the axis even after entering the plot.
         f.move({point.x + 60, point.y - 45});
         const auto after = f.state();
-        require((axis == 2 ? near(after.x.Size(), before.x.Size()) : after.x.Size() < before.x.Size()) &&
-                (axis == 1 ? near(after.y.Size(), before.y.Size()) : after.y.Size() < before.y.Size()),
-            "Right/up dragging must zoom the axes chosen at press time");
+        require((axis == 2 ? near(after.x.Size(), before.x.Size()) : after.x.Size() > before.x.Size()) &&
+                (axis == 1 ? near(after.y.Size(), before.y.Size()) : after.y.Size() > before.y.Size()),
+            "Right/up dragging must zoom out on the axes chosen at press time");
         require(near(after.x.Max, before.x.Max), "A held right drag must keep following the latest data");
         f.append(20'000, 20'000);
         f.frame();
@@ -797,9 +827,9 @@ void right_drag_zoom_regions() {
                 near(f.state().y.Min, before.y.Min) && near(f.state().y.Max, before.y.Max),
             "Returning a drag to its start must restore the original scales");
         f.move({point.x - 50, point.y + 35});
-        require((axis == 2 ? near(f.state().x.Size(), before.x.Size()) : f.state().x.Size() > before.x.Size()) &&
-                (axis == 1 ? near(f.state().y.Size(), before.y.Size()) : f.state().y.Size() > before.y.Size()),
-            "Left/down dragging must zoom out on the captured axes");
+        require((axis == 2 ? near(f.state().x.Size(), before.x.Size()) : f.state().x.Size() < before.x.Size()) &&
+                (axis == 1 ? near(f.state().y.Size(), before.y.Size()) : f.state().y.Size() < before.y.Size()),
+            "Left/down dragging must zoom in on the captured axes");
         f.mouse(ImGuiMouseButton_Right, false);
         require(GImGui->OpenPopupStack.empty(), "Right release must not open menus");
     }
@@ -841,7 +871,7 @@ void unsupported_inputs_and_host_override() {
     f.move(states[0].rect.GetCenter());
     ImGui::GetIO().AddMouseWheelEvent(0, 1);
     f.frame();
-    require(f.states()[0].x.Size() < states[0].x.Size() &&
+    require(f.states()[0].x.Size() > states[0].x.Size() &&
             near(f.states()[1].x.Size(), states[1].x.Size()) &&
             near(f.states()[1].y.Size(), states[1].y.Size()),
         "Zoom must affect only the hovered component instance");
@@ -937,7 +967,7 @@ void pan_live_and_paused() {
         initial.rect.GetWidth() * initial.x.Size();
     ImGui::GetIO().AddMouseWheelEvent(0, 1);
     f.frame();
-    require(f.view->paused() && f.state().x.Size() < initial.x.Size() &&
+    require(f.view->paused() && f.state().x.Size() > initial.x.Size() &&
             near((actual_anchor - initial.x.Min) / initial.x.Size(),
                  (actual_anchor - f.state().x.Min) / f.state().x.Size()) && std::isfinite(anchor_x),
         "Paused zoom must keep the mouse's X anchor without resuming");
@@ -1095,6 +1125,7 @@ int main() {
         fast_audio_narrow_view_has_stable_layout();
         sample_markers_follow_horizontal_zoom();
         irregular_sample_markers_respect_bursts();
+        overlap_compensation_is_local_to_the_trace();
         default_view_fills_then_scrolls();
         default_span_uses_the_actual_frame_budget();
         irregular_full_ring_uses_real_elapsed_time();
