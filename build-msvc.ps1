@@ -116,7 +116,7 @@ try {
         return $objectPath
     }
 
-    function Link-MsvcExecutable([string]$executablePath, [string[]]$objects, [string[]]$extraFlags) {
+    function Link-MsvcBinary([string]$executablePath, [string[]]$objects, [string[]]$extraFlags) {
         $needsLink = $forceRebuild -or -not (Test-Path -LiteralPath $executablePath -PathType Leaf)
         if (-not $needsLink) {
             $executableTime = (Get-Item -LiteralPath $executablePath).LastWriteTimeUtc
@@ -143,14 +143,20 @@ try {
         'third_party/implot-1.0/implot_items.cpp'
     )) { $viewObjects += Build-MsvcObject $source }
 
-    $appObjects = $viewObjects + @(
-        (Build-MsvcObject 'src/main.cpp'),
+    $backendObjects = @(
         (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
         (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
     )
-    Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'ws2_32.lib', 'advapi32.lib')
-    Link-MsvcExecutable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
-    Link-MsvcExecutable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
+    $guiLibraries = @('d3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'shell32.lib', 'advapi32.lib')
+    $appObjects = $viewObjects + $backendObjects + @((Build-MsvcObject 'src/main.cpp'))
+    Link-MsvcBinary (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects (@('/SUBSYSTEM:WINDOWS', 'ws2_32.lib') + $guiLibraries)
+    Link-MsvcBinary (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
+    Link-MsvcBinary (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
+    $nativeImport = Join-Path $buildDirectory 'Wave.lib'
+    if (-not (Test-Path -LiteralPath $nativeImport)) { $forceRebuild = $true }
+    $nativeObjects = $viewObjects + $backendObjects + @((Build-MsvcObject 'src/wave_native.cpp'))
+    Link-MsvcBinary (Join-Path $buildDirectory 'Wave.dll') $nativeObjects (@('/DLL', ('/IMPLIB:' + $nativeImport)) + $guiLibraries)
+    Link-MsvcBinary (Join-Path $buildDirectory 'CppHostDemo.exe') @((Build-MsvcObject 'examples/cpp_host_demo.cpp'), $nativeImport) @('/SUBSYSTEM:WINDOWS', 'user32.lib', 'gdi32.lib')
     [IO.File]::WriteAllText($configurationFile, $configuration)
     Write-Host 'MSVC build completed.' -ForegroundColor Green
     Write-Host ('Run: ' + (Join-Path $buildDirectory 'WaveDemo.exe'))

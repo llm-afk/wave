@@ -467,9 +467,9 @@ struct WaveView::Impl {
         }
     }
 
-    void draw(TouchpadDelta fingers) {
+    void draw(TouchpadDelta fingers, double now) {
         sync_channels();
-        store.update_clocks(ImGui::GetTime());
+        store.update_clocks(now);
         const auto live = live_timeline();
         capacity_seconds = live.capacity_seconds;
         if (live.range.empty || live.range.end < resume_floor || live.playhead >= resume_floor)
@@ -616,7 +616,11 @@ WaveView::WaveView(DataStore& store, ViewOptions options) : impl_(std::make_uniq
 WaveView::WaveView(SignalHub& store, ViewOptions options) : impl_(std::make_unique<Impl>(store, options)) {}
 WaveView::~WaveView() = default;
 void WaveView::draw() { draw({}); }
-void WaveView::draw(TouchpadDelta fingers) { impl_->draw(fingers); }
+void WaveView::draw(TouchpadDelta fingers) { draw(fingers, ImGui::GetTime()); }
+void WaveView::draw(TouchpadDelta fingers, double now) {
+    if (!std::isfinite(now) || now < 0) throw std::invalid_argument("Display time must be finite and nonnegative");
+    impl_->draw(fingers, now);
+}
 void WaveView::set_time_span(double seconds) {
     validate_span(seconds);
     impl_->automatic_span = false;
@@ -665,4 +669,9 @@ bool WaveView::channel_visible(std::size_t channel) const {
     return impl_->visible[channel];
 }
 std::size_t WaveView::points_this_frame() const { return impl_->points; }
+ViewState WaveView::state() const {
+    impl_->sync_channels();
+    const auto x = impl_->paused ? impl_->paused_x : impl_->live_x(impl_->live_timeline());
+    return {x.min, x.max, impl_->y.min, impl_->y.max, impl_->points, impl_->paused, impl_->auto_y};
+}
 } // namespace wave

@@ -79,11 +79,13 @@ public:
                    return a.name==b.name && a.unit==b.unit && a.id==b.id;
                })) return;
         }
-        channels_.clear(); bindings_.clear();
+        std::vector<ChannelInfo> channels;
+        std::vector<SignalBinding> bindings;
         for(std::size_t i=0;i<sources_.size();++i) {
             const auto& c=sources_[i]->data->channels();
-            for(std::size_t j=0;j<c.size();++j) {channels_.push_back(c[j]); bindings_.push_back({i,j});}
+            for(std::size_t j=0;j<c.size();++j) {channels.push_back(c[j]); bindings.push_back({i,j});}
         }
+        channels_=std::move(channels); bindings_=std::move(bindings);
     }
     Source* find(const std::string& id) {
         for(auto& s:sources_) if(s->id==id) return s.get(); return nullptr;
@@ -107,9 +109,30 @@ public:
         }
         auto s=std::make_unique<Source>(); s->id=id; s->name=name;
         s->owned=std::make_unique<DataStore>(1,double(capacity_),std::vector<ChannelInfo>{}); s->data=s->owned.get();
-        s->data->configure(rate,metadata,received); sources_.push_back(std::move(s)); sync(); return *sources_.back();
+        s->data->configure(rate,metadata,received); sources_.push_back(std::move(s));
+        try {sync();} catch(...) {sources_.pop_back(); throw;}
+        return *sources_.back();
     }
     const std::vector<ChannelInfo>& channels() const {return channels_;}
+    // Both transport adapters commit through these operations. Sequence changes
+    // happen only after the data store accepts the complete batch.
+    std::uint64_t append_frames(Source& source, std::uint64_t first, std::span<const float> values) {
+        const auto channels = source.data->channels().size();
+        if (!channels || values.empty() || values.size() % channels)
+            throw std::invalid_argument("Batch must contain complete interleaved frames");
+        const auto frames = values.size() / channels;
+        if (first < source.next || frames > std::numeric_limits<std::uint64_t>::max() - first)
+            throw std::invalid_argument("Invalid frame sequence");
+        source.data->append(first, values);
+        source.next = first + frames;
+        return source.next;
+    }
+    std::uint64_t append_received(Source& source, std::span<const float> values, double seconds) {
+        source.data->append_received(source.next, values, seconds);
+        source.last_time = seconds;
+        source.anchored = true;
+        return ++source.next;
+    }
     std::size_t source_count() const {return sources_.size();}
     std::size_t capacity_frames() const {return capacity_;}
     const Source& source(std::size_t channel) const {return *sources_.at(bindings_.at(channel).source);}

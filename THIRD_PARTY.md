@@ -16,7 +16,8 @@ system-wide software is installed.
 `build-msvc.ps1` accepts explicit MSVC and Windows SDK paths for an existing
 installation.
 `scripts/bootstrap.ps1` downloads the MinGW alternative; it does not provision
-MSVC or the Windows SDK. The supplied executables were built with LLVM MinGW.
+MSVC or the Windows SDK. The standalone application and embedding demos can also
+be built with an existing MinGW-w64 C++20 compiler through CMake.
 
 The build scripts statically link the selected C++ runtime (`/MT` for MSVC or
 `-static` for MinGW) and use Windows system DLLs for Win32 and DirectX 11. The

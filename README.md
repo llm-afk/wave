@@ -6,7 +6,7 @@ C++20 / Dear ImGui / ImPlot。独立演示程序使用 Windows / DirectX 11。
 
 支持轴区域和绘图区滚轮缩放、右键拖动缩放、左键平移和双击暂停。演示程序显示单一实时波形，绘图组件由宿主安排布局，图例显示名称和颜色。
 
-默认每通道保留 50,000 帧。总计 20 通道、每通道最高 50 kSa/s 是暂定的设计负载。通道与批次结构、迁移顺序和现行 v2 边界见 [组件数据交互设计草案](examples/PROTOCOL.md#component-data-design)。
+默认每通道保留 50,000 帧。总计 20 通道、每通道最高 50 kSa/s 是暂定的设计负载。通道、批次和现行 v2 边界见 [组件数据交互边界](examples/PROTOCOL.md#component-data-design)。
 
 ## 运行演示程序
 
@@ -28,7 +28,18 @@ Y 轴自动适配当前视窗里所有可见波形。最高点到最低点占绘
 
 ## 嵌入上位机
 
-当前 C++/ImGui 宿主可复用自己的上下文、渲染后端和帧循环，将 `WaveView` 放进窗口的一个子区域。数据池由宿主持有，生命周期长于视图。多窗画板、输入归属和其他宿主的适配器接口见[画板嵌入与交互设计](examples/EMBEDDING.md)。
+当前 C++/ImGui 宿主可复用自己的上下文、渲染后端和帧循环，将 `WaveView` 放进窗口的一个子区域。数据池由宿主持有，生命周期长于视图。数据入口、窗口生命周期和交互约定见[组件嵌入与交互说明](examples/EMBEDDING.md)。
+
+Windows C++ 或 Python 宿主还可调用 `Wave.dll` 的 C ABI，在自己的窗口中创建原生子控件。使用方式和线程约定见[同进程 DLL 接入](examples/EMBEDDING.md#windows-dll-与-python-的最小接入)。Python 封装仅使用标准库 ctypes，数据可按批提交为连续 float32 数组。
+
+两份嵌入 Demo 可直接运行，使用相同 DLL 和后台模拟数据。
+
+| 启动入口 | 宿主 | 源码 |
+| --- | --- | --- |
+| `run-cpp-demo.cmd` | C++ / Win32 | `examples/cpp_host_demo.cpp` |
+| `run-python-demo.cmd` | Python / Tkinter | `examples/python_host_demo.py` |
+
+宿主顶栏提供暂停、自动 Y、时间跨度和滚动方向设置。绘图区保留双击暂停、平移和缩放。默认两通道、20 kSa/s、每通道 50,000 帧，模拟数据仅由 Demo 的后台线程生成。
 
 ```cpp
 #include "data_core.hpp"
@@ -93,7 +104,7 @@ target_link_libraries(MyHost PRIVATE Wave::view)
 独立配置时也可显式关闭可执行程序：
 
 ```powershell
-cmake -S . -B build/core-only -DWAVE_BUILD_DEMO=OFF -DWAVE_BUILD_EXAMPLES=OFF
+cmake -S . -B build/core-only -DWAVE_BUILD_DEMO=OFF -DWAVE_BUILD_EXAMPLES=OFF -DWAVE_BUILD_NATIVE=OFF -DWAVE_BUILD_HOST_DEMOS=OFF
 cmake --build build/core-only --config Release
 ```
 
@@ -108,11 +119,14 @@ src/plot_navigation.hpp    轴区域/绘图区缩放的纯数学计算
 src/main.cpp               独立演示：原生窗口、DX11、帧循环和 TCP
 src/tcp_source.hpp         可选 TCP 接收适配器
 src/wave_protocol.hpp      TCP v2 编解码
+src/wave_native.h/.cpp     DLL 的 C ABI、数据会话和原生视图入口
+src/win32_embedded_view.hpp Windows 子控件、上下文和帧提交
+src/d3d11_surface.hpp      独立程序与子控件共用的 DX11 资源管理
 examples/                  外部数据源、Python 客户端及协议
 third_party/               ImGui、ImPlot 源码和 Win32/DX11 后端
 scripts/bootstrap.ps1      准备构建依赖和便携编译器
-build/                     当前 Wave 和两个配套数据源 EXE
-run*.cmd                   示波器和配套数据源的启动入口
+build/                     Wave.dll、独立程序、C++ 宿主 Demo 与配套数据源
+run*.cmd                   示波器、两个宿主 Demo 和数据源的启动入口
 ```
 
 ## 构建
@@ -124,4 +138,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-默认构建演示程序和两个独立数据源。有对应微软工具链时也可为 `build-msvc.ps1` 指定 MSVC 和 SDK 路径，或通过 CMake 构建。发布时保留第三方许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+默认构建独立程序、两个数据源、`Wave.dll` 和 `CppHostDemo.exe`。Python Demo 使用带 Tkinter 的同位数 Python。也可通过 CMake 使用本机编译器构建，或为 `build-msvc.ps1` 指定 MSVC 和 SDK 路径。`Wave::native` 是 C ABI 导入目标，`Wave::view` 保留 C++/ImGui 的直接接入方式。发布时保留第三方许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。

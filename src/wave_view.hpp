@@ -22,6 +22,12 @@ struct ViewOptions {
 // Positive components mean physical finger motion right and up, respectively.
 struct TouchpadDelta { float right = 0, up = 0; };
 
+struct ViewState {
+    double x_min, x_max, y_min, y_max;
+    std::size_t plotted_points;
+    bool paused, auto_y;
+};
+
 // One live plot in the current ImGui window/child's available area.
 // The time axis follows live data. Pause affects only this view; the data store
 // keeps receiving, and resuming jumps straight to the latest cached data.
@@ -39,6 +45,8 @@ public:
     // Pass the host's two-finger displacement once per frame. Consume its native
     // event to avoid duplicate wheel input. A zero delta is equivalent to draw().
     void draw(TouchpadDelta fingers);
+    // Views sharing a SignalHub across GUI contexts use the same monotonic clock.
+    void draw(TouchpadDelta fingers, double monotonic_seconds);
     void set_time_span(double seconds);
     void set_y_range(double minimum, double maximum);
     void set_auto_y(bool enabled);
@@ -53,6 +61,7 @@ public:
     void set_channel_visible(std::size_t channel, bool visible);
     bool channel_visible(std::size_t channel) const;
     std::size_t points_this_frame() const;
+    ViewState state() const;
 
 private:
     struct Impl;

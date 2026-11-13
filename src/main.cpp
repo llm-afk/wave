@@ -6,6 +6,7 @@
 #include "data_core.hpp"
 #include "wave_view.hpp"
 #include "win32_touchpad.hpp"
+#include "d3d11_surface.hpp"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -23,71 +24,13 @@
 #include <vector>
 
 namespace {
-ID3D11Device* device{};
-ID3D11DeviceContext* device_context{};
-IDXGISwapChain* swap_chain{};
-ID3D11RenderTargetView* render_target{};
+wave::win32::D3D11Surface surface;
 UINT resize_width{}, resize_height{};
 constexpr UINT_PTR move_size_timer = 1;
 bool moving_or_sizing = false;
 wave::win32::TouchpadInput touchpad;
 wave::win32::WheelInput wheel;
 std::function<void()> render_frame;
-
-bool make_render_target() {
-    ID3D11Texture2D* buffer{};
-    if (FAILED(swap_chain->GetBuffer(0, IID_PPV_ARGS(&buffer)))) return false;
-    const auto result = device->CreateRenderTargetView(buffer, nullptr, &render_target);
-    buffer->Release();
-    return SUCCEEDED(result);
-}
-void release_render_target() {
-    if (device_context) device_context->OMSetRenderTargets(0, nullptr, nullptr);
-    if (render_target) { render_target->Release(); render_target = nullptr; }
-}
-void cleanup_device() {
-    release_render_target();
-    if (swap_chain) { swap_chain->Release(); swap_chain = nullptr; }
-    if (device_context) { device_context->Release(); device_context = nullptr; }
-    if (device) { device->Release(); device = nullptr; }
-}
-bool create_device(HWND window) {
-    DXGI_SWAP_CHAIN_DESC desc{};
-    desc.BufferCount = 2;
-    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.OutputWindow = window;
-    desc.SampleDesc.Count = 1;
-    desc.Windowed = TRUE;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    D3D_FEATURE_LEVEL level{};
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
-    auto result = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE,
-        nullptr, 0, levels, 2, D3D11_SDK_VERSION, &desc, &swap_chain,
-        &device, &level, &device_context);
-    if (FAILED(result)) {
-        cleanup_device();
-        result = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP,
-            nullptr, 0, levels, 2, D3D11_SDK_VERSION, &desc, &swap_chain,
-            &device, &level, &device_context);
-    }
-    if (FAILED(result)) return false;
-    // Keep input responsive by avoiding several queued frames. VSync below
-    // still determines the cadence; no refresh rate is hard-coded here.
-    IDXGIDevice1* dxgi_device{};
-    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device)))) {
-        const auto latency_result = dxgi_device->SetMaximumFrameLatency(1);
-        dxgi_device->Release();
-        if (FAILED(latency_result))
-            OutputDebugStringW(L"Wave: using the driver's default frame latency.\n");
-    }
-    IDXGIFactory* factory{};
-    if (SUCCEEDED(swap_chain->GetParent(IID_PPV_ARGS(&factory)))) {
-        factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
-        factory->Release();
-    }
-    return make_render_target();
-}
 
 } // namespace
 
@@ -152,9 +95,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     HWND window = CreateWindowW(cls.lpszClassName, L"Wave", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, static_cast<int>(1200 * scale), static_cast<int>(790 * scale),
         nullptr, nullptr, instance, nullptr);
-    if (!window || !create_device(window)) {
+    if (!window || !surface.create(window)) {
         MessageBoxW(nullptr, L"无法初始化 DirectX 11。", L"Wave Demo", MB_ICONERROR);
-        cleanup_device();
+        surface.cleanup();
         if (window) DestroyWindow(window);
         UnregisterClassW(cls.lpszClassName, instance);
         return 1;
@@ -171,7 +114,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     float current_dpi_scale = ImGui_ImplWin32_GetDpiScaleForHwnd(window);
     wave::apply_style(current_dpi_scale);
     ImGui_ImplWin32_Init(window);
-    ImGui_ImplDX11_Init(device, device_context);
+    ImGui_ImplDX11_Init(surface.device, surface.context);
     touchpad.enable(window);
     wheel.enable(window);
 
@@ -218,14 +161,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         }
         // Normal use sleeps when hidden. Smoke mode still exercises frame
         // generation and DX11 submission on non-interactive test desktops.
-        if (!smoke && (IsIconic(window) || (occluded && swap_chain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED))) {
+        if (!smoke && (IsIconic(window) || (occluded && surface.swap_chain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED))) {
             return;
         }
         occluded = false;
         if (resize_width && resize_height) {
-            release_render_target();
-            if (FAILED(swap_chain->ResizeBuffers(0, resize_width, resize_height, DXGI_FORMAT_UNKNOWN, 0))
-                || !make_render_target()) { render_failed = true; return; }
+            if (!surface.resize(resize_width, resize_height)) { render_failed = true; return; }
             resize_width = resize_height = 0;
         }
         const auto work_started = std::chrono::steady_clock::now();
@@ -248,8 +189,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         minimum_draw_vertices = std::min(minimum_draw_vertices, vertices);
         if (vertices == 0) ++empty_draw_frames;
         const float clear[] = {0, 0, 0, 1};
-        device_context->OMSetRenderTargets(1, &render_target, nullptr);
-        device_context->ClearRenderTargetView(render_target, clear);
+        surface.context->OMSetRenderTargets(1, &surface.target, nullptr);
+        surface.context->ClearRenderTargetView(surface.target, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         frame_work_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - work_started).count();
         ++frame_count;
@@ -257,7 +198,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         max_points = std::max(max_points, view.points_this_frame());
         // One vertical blank interval: DXGI follows the display containing
         // most of the window, including when it moves to a different monitor.
-        const auto result = swap_chain->Present(1, 0);
+        const auto result = surface.swap_chain->Present(1, 0);
         occluded = result == DXGI_STATUS_OCCLUDED;
         if (FAILED(result)) { render_failed = true; return; }
         if (result == S_OK) ++presented_frames;
@@ -305,7 +246,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     ImGui_ImplWin32_Shutdown();
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
-    cleanup_device();
+    surface.cleanup();
     DestroyWindow(window);
     UnregisterClassW(cls.lpszClassName, instance);
     return render_failed || (smoke && frame_count == 0) ? 1 : 0;

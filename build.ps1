@@ -70,7 +70,7 @@ try {
         return $objectPath
     }
 
-    function Link-Executable([string]$executablePath, [string[]]$objects, [string[]]$extraFlags) {
+    function Link-Binary([string]$executablePath, [string[]]$objects, [string[]]$extraFlags) {
         $needsLink = $forceRebuild -or -not (Test-Path -LiteralPath $executablePath -PathType Leaf)
         if (-not $needsLink) {
             $executableTime = (Get-Item -LiteralPath $executablePath).LastWriteTimeUtc
@@ -97,14 +97,20 @@ try {
         'third_party/implot-1.0/implot_items.cpp'
     )) { $viewObjects += Build-Object $source }
 
-    $appObjects = $viewObjects + @(
-        (Build-Object 'src/main.cpp'),
+    $backendObjects = @(
         (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
         (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
     )
-    Link-Executable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('-mwindows', '-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32', '-lws2_32', '-ladvapi32')
-    Link-Executable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-Object 'examples/system_source.cpp')) @('-lws2_32')
-    Link-Executable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-Object 'examples/audio_source.cpp')) @('-lws2_32', '-lole32', '-luuid')
+    $guiLibraries = @('-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32', '-ladvapi32')
+    $appObjects = $viewObjects + $backendObjects + @((Build-Object 'src/main.cpp'))
+    Link-Binary (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects (@('-mwindows', '-lws2_32') + $guiLibraries)
+    Link-Binary (Join-Path $buildDirectory 'SystemSource.exe') @((Build-Object 'examples/system_source.cpp')) @('-lws2_32')
+    Link-Binary (Join-Path $buildDirectory 'AudioSource.exe') @((Build-Object 'examples/audio_source.cpp')) @('-lws2_32', '-lole32', '-luuid')
+    $nativeImport = Join-Path $buildDirectory 'libWave.dll.a'
+    if (-not (Test-Path -LiteralPath $nativeImport)) { $forceRebuild = $true }
+    $nativeObjects = $viewObjects + $backendObjects + @((Build-Object 'src/wave_native.cpp'))
+    Link-Binary (Join-Path $buildDirectory 'Wave.dll') $nativeObjects (@('-shared', ('-Wl,--out-implib,' + $nativeImport)) + $guiLibraries)
+    Link-Binary (Join-Path $buildDirectory 'CppHostDemo.exe') @((Build-Object 'examples/cpp_host_demo.cpp'), $nativeImport) @('-mwindows', '-luser32', '-lgdi32')
 
     [IO.File]::WriteAllText($configurationFile, $configuration)
     Write-Host 'Build completed.' -ForegroundColor Green

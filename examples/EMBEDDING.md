@@ -1,82 +1,78 @@
 # Wave 嵌入与交互设计
 
-宿主嵌入一块完整画板，默认一个示波窗铺满。增加第二个示波窗后，用户可以拖动、吸附和调整分隔线。宿主技术栈确定前，先约定采样写入、画板状态和输入归属。下文的 `WaveCanvas`、通用挂载接口及多窗菜单是设计草案。
+当前框架面向一个宿主界面、一块多通道波形绘图区。宿主负责设备采集、界面布局和消息循环，Wave 负责缓存、按视区查询及波形交互。C++/Win32 与 Python/Tkinter 两个 Demo 用来验证这条接入链。
 
 ## 今天可以怎样接入
 
-同进程 C++ 宿主可链接 `Wave::data`，用 `DataStore::configure()` 注册通道，采集线程按批调用 `append()`。等间隔数据按帧交错，例如两通道两帧为 `[A0, B0, A1, B1]`。调用返回后可复用输入内存。使用 ImGui/ImPlot 的宿主再链接 `Wave::view`，在自己的窗口或子区域逐帧调用 `WaveView::draw()`。[接入代码和 CMake 用法](../README.md#嵌入上位机)
+同进程 C++ 宿主可链接 `Wave::data`，用 `DataStore::configure()` 注册通道，采集线程按批调用 `append()`。等间隔数据按帧交错，例如两通道两帧为 `[A0, B0, A1, B1]`。调用返回后可复用输入内存。使用 ImGui/ImPlot 的宿主再链接 `Wave::view`，在自己的窗口或子区域逐帧调用 `WaveView::draw()`。`WaveView::state()` 可读取用户操作后的范围、暂停和自动 Y 状态。[接入代码和 CMake 用法](../README.md#嵌入上位机)
 
-当前 `SignalHub` 的注册和多来源容量调整在 UI 线程串行执行。独立 Demo 的 TCP 数据经 `Receiver::poll()` 提交。元数据固定后的 `DataStore` 可从后台写入。宿主复用自己的设备连接，只有外部进程供数时才需要 TCP 适配器。单图手势已实现，通用画板和其他 GUI 框架的控件适配器待实现。[数据边界与迁移顺序](PROTOCOL.md#component-data-design)
+Windows 上还可使用 `Wave.dll`。导出的 C ABI v1 见 [wave_native.h](../src/wave_native.h)，Python 标准库封装见 [wave_native.py](wave_native.py)。组件创建属于宿主的 `WS_CHILD` 绘图窗口，每个窗口拥有独立的 ImGui/ImPlot 上下文、GPU 资源和显示状态。宿主提供父窗口句柄、位置和渲染定时器，DLL 内每次调用和窗口消息处理结束后恢复之前的 GUI 上下文。C++/Win32 与 Python/Tkinter 两个可运行 Demo 使用同一个 DLL。[ctypes 文档](https://docs.python.org/3/library/ctypes.html) · [Win32 子窗口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowexw)
 
-## 三个对象的职责
+DLL 的所有视图使用同一系统单调时钟驱动共享缓存的滚动。直接使用多个 ImGui 上下文的 C++ 宿主可调用 `view.draw(fingers, monotonic_seconds)`，给同一数据会话传入一致的单调时间。单上下文宿主可以继续使用 `draw()`。
 
-| 谁持有 | 负责什么 | 生命周期 |
-| --- | --- | --- |
-| 宿主持有采集会话 | 设备连接、流注册、一份共享实时缓存、每通道容量 | 可跨页面、画板和示波窗存在。关闭最后一幅图也能继续采集 |
-| 一个 `WaveCanvas` 对应一块画板 | 顶部菜单、面板 ID、浮动和分割布局、焦点、手势捕获 | 绑定一份数据会话，可随页面隐藏、卸载或换渲染表面 |
-| 一个 `WaveView` 对应一个示波窗 | 通道选择、X 跨度、Y 自动或手动、实时或暂停、绘图 | 移动和停靠沿用同一实例。关闭时释放本窗的冻结数据 |
+### Windows DLL 与 Python 的最小接入
 
-数据方向为 **采集线程 → 共享缓存 → 各窗按当前时间范围和像素宽度读取 → 宿主提交画面**。新样本由缓存接收。UI 每次重绘读取最新可用数据，多批到达可合并为一次重绘。隐藏的画板可以停止绘图。恢复显示时，实时窗跟上最新数据，暂停窗继续使用自己的快照。
+将 `examples/wave_native.py` 放入宿主可导入的位置，给 `Library(path)` 传入匹配宿主位数的 DLL 路径。
 
-### 拟议的最小宿主接口
+```python
+from array import array
+from wave_native import Library
 
-以下是行为签名的伪代码。第一版复用现有 `DataStore`、`SignalHub` 和 `WaveView`。流注册、`append_copy` 和 `ChannelKey` 沿用已有数据接口草案，便于同一数据接入多个视图。[流与批次定义](PROTOCOL.md#数据结构与-api-草案)
+session = Library("path/to/Wave.dll").session(capacity_frames=50_000)
+stream = session.open_stream("motor", [
+    {"id": "ia", "name": "Phase A", "unit": "A"},
+    {"id": "ib", "name": "Phase B", "unit": "A"},
+], sample_rate=50_000)
+view = session.create_window(parent_hwnd)  # 宿主 UI 线程
+view.set_bounds(0, 0, width_pixels, height_pixels)
 
-```text
-采集或管理
-  writer = data.register_stream(descriptor)
-  result = writer.append_copy(batch)
-  result = data.set_capacity_frames(frames_per_channel)
+# 采集线程。交错 float32，返回后可复用输入数组。
+next_frame = stream.append(array("f", [0.1, 0.2, 0.3, 0.4]))
 
-画板与宿主 UI 线程
-  canvas = WaveCanvas(data)
-  panel = canvas.add_panel(options, channel_selection)
-  result = canvas.apply(command)
-  state = canvas.state()
-  changes = canvas.take_changes()
-  config = canvas.save_layout()
-  result = canvas.restore_layout(config)
+# 宿主 UI 定时器，每帧一次。
+view.render()
+state = view.state()
 
-宿主框架适配器
-  adapter.attach(canvas, host_surface)
-  adapter.resize(logical_size, device_pixel_ratio)
-  reply = adapter.input(local_event)
-  adapter.draw(frame_context)
-  adapter.detach()
+# 退出时先停止采集线程和 UI 定时器。
+view.close()  # 创建该视图的 UI 线程
+stream.close()
+session.close()
 ```
 
-- **数据提交。** 每流一个有序写入端，消费整批并回复成功帧数、下一帧序号或错误。生产者在返回后可复用内存。同一批次的同步通道在一幅视图里使用相同的读取终点。独立来源保留各自的时间依据。
-- **命令和反馈。** 面板命令携带稳定的 `PanelId`，例如设置暂停、通道、自动 Y。菜单和宿主工具栏调用同一操作。`state()` 可读实际视窗和模式，供宿主显示。`take_changes()` 在事件或绘图完成后取走已生效的变化。同一次拖动的中间状态可合并，持久化只需在松手时做一次。关闭后的面板 ID 返回失效错误。
-- **显示表面。** 通用状态与命令仅使用标识、范围和逻辑像素。原生窗口、GPU 设备和具体绘图库类型留在适配器。已有 ImGui 宿主沿用自己的帧循环、上下文和输入后端。组件主题只在画板范围内生效。其他宿主提供一个子控件，处理重绘、尺寸、DPI、焦点与捕获。确定首个宿主后再选择原生绘制表面或纹理合成。
-- **挂载和退出。** 宿主先创建会话、注册流，再挂载画板和开始采集。卸载画板时释放鼠标捕获，取消该表面的待处理重绘，在所属渲染线程释放其资源。宿主结束整个会话时先停止写入并等正在提交的批次返回，再销毁会话。采集线程始终只接触写入端。
+- 同一会话的注册、写入、容量切换和视图读数通过一把锁串行。写入调用直接提交到缓存。每个流保持一个活动写入句柄，重复 ID 的同时注册会报错。关闭后用同一 schema 重开可接着原序号写入。
+- `append()` 接受 `array('f')`、连续 float32 NumPy 数组或普通平铺序列。可写连续 float32 缓冲区直接传指针，DLL 在调用内复制到环形缓存。只读缓冲区先作一次 Python 侧拷贝。显式传入 `first_frame` 时拒绝倒退序号和非法样本，失败返回前不接受该批次。
+- `sample_rate=0` 的流调用 `append_received(values, seconds)`，每次提交一帧，各来源的秒数由宿主放在同一时间基准上。均匀采样源使用 `first_frame / sample_rate` 的时间。
+- 数据会话、流和视图分别持有共享数据的所有权。关闭会话句柄后，已存在的流和视图仍持有数据。修改容量时流句柄在锁内重新定位数据池，暂停快照继续独立存在。释放某个句柄前应结束对它的并发调用，Python 封装还会串行该句柄的调用和 `close()`。
+- 创建、改变位置、绘图、配置和销毁原生视图都在父窗口所属 UI 线程执行。宿主负责消息循环与 DPI 策略，尺寸按像素传入。隐藏页面时可停绘，恢复时调用 `render()`。父窗口先销毁后，应继续关闭 Wave 视图句柄以释放图形资源。[Tkinter 线程模型](https://docs.python.org/3/library/tkinter.html#threading-model)
+- C 函数返回状态码，错误文字通过 `wave_last_error()` 在当前线程立即读取。异常在 DLL 边界转换为状态码。Python 封装为失败调用抛出异常，并检查 ABI 版本。
+- 原始双指坐标按向右、向上为正处理。宿主可用 `set_reverse_scroll()` 调整转换后滚动消息的方向，两个 Demo 提供对应复选框。Demo 默认勾选，匹配当前远程桌面的实测方向。
 
-## 板上操作
+两个 Demo 都使用后台生成的 2 通道、20 kSa/s 模拟数据，宿主顶栏可切换暂停、自动 Y 和时间跨度。它们分别验证 Win32 与 Tkinter 的实际子控件挂载。Qt/PySide 等其他宿主的框架生命周期和重绘适配待选定后验证。
 
-顶部只放 **窗口** 和 **设置**。窗口菜单负责新增、平铺和恢复默认布局。设置菜单里的缓存帧数作用于该画板所绑定的数据会话，旁边标明“每通道帧数，共享此数据的窗口同步生效”。小窗右键菜单提供通道选择、时间跨度、自动或手动 Y、暂停或恢复。只剩一窗时铺满，关闭最后一窗后可通过顶部菜单重新添加。
+直接使用 C++ `SignalHub` 时，注册和容量调整由宿主在 UI 线程串行执行。独立 Demo 的 TCP 数据经 `Receiver::poll()` 提交。元数据固定后的 `DataStore` 可从后台写入。DLL 接口在会话内补充串行保护。宿主复用自己的设备连接，外部进程供数可继续使用 TCP 适配器。[数据交互边界](PROTOCOL.md#component-data-design)
 
-例如打开“电机调试”页，首窗铺满并显示已注册通道。在顶部新增第二窗后，可分别右击两图，让左窗只看相电流、右窗只看温度。双击左窗检查某个峰值时，右窗继续更新。新窗初次默认沿用当前窗的通道选择并进入实时模式。各窗的默认 X 跨度按各自可见通道的缓存时长计算，Y 自动适配 80% 的绘图区高度。
+## 当前框架的职责
 
-| 鼠标落点 | 操作 | 响应 |
+| 层 | 入口 | 职责 |
 | --- | --- | --- |
-| 波形区 | 左拖、左键双击 | 实时左拖平移 Y，暂停后可平移 XY。双击切换本窗暂停，恢复时跳到最新缓存 |
-| 波形区及两侧刻度 | 双指并排滑动、右键拖动、滚轮 | 横向和纵向位移分别决定 X、Y 缩放倍率。向右放大 X，向上放大 Y，向左下看全貌。纯横移保留自动 Y，暂停时保持指针下的时间和幅值 |
-| 波形区或轴 | 右键按下再松开 | 移动不足 3 个逻辑像素，在松手时打开本窗菜单。一旦达到阈值即进入缩放，拖回起点再松手也按拖动结束 |
-| 子窗标题、浮窗边框、公共分隔线 | 左拖 | 标题移动，边框调整浮窗大小，公共分隔线改变相邻两窗比例。单窗模式省去拖动标题条 |
-| 图例、已打开的菜单、画板外 | 点击、滚轮 | 图例仅显示通道。菜单处理自身输入。画板外由宿主处理，宿主的按钮和滚动区正常响应 |
+| 数据 | `DataStore` / `SignalHub` | 通道元数据、批次校验、帧序号、共享有界缓存 |
+| 接入 | C ABI / Python 封装 / TCP v2 | 把宿主数据交给同一数据层，回复成功或错误 |
+| 显示 | `WaveView` / Windows 子控件 | 一块绘图区、多通道、显示范围与暂停状态 |
+| 宿主 | C++ 或 Python GUI | 采集线程、布局、帧调度、窗口生命周期 |
 
-宿主能识别双指手势时，将本帧两指中心的位移转换为逻辑像素，调用 `view.draw(wave::TouchpadDelta{right, up})`。向右、向上分别取正，松手后传零。已转交的手势由 Wave 消费一次。普通鼠标事件继续走 ImGui。独立演示程序优先读取精密触摸板的触点坐标。对于带触摸板标记的滚动，或这类远程桌面转发的无设备句柄滚动，演示程序按接收端的 Windows 触摸板滚动设置换算方向。连接只上报一轴时仅缩放该轴。[Windows 触摸板设置](https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/touchpad-tuning-guidelines) · [Windows 原始输入设备句柄](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawinputheader)
+采集适配器先注册一组同步通道，之后只提交交错 float32 批次。不同采样率的通道各自注册逻辑流，显示层从这些流读取需要的通道。框架边界与当前协议约定见 [数据交互边界](PROTOCOL.md#component-data-design)。
 
-按下时记录命中区域和所属面板。输入坐标统一用画板本地逻辑像素，适配器处理一次缩放换算。拖出区域仍由原手势接收移动与松开。弹窗优先于下层面板，重叠浮窗优先命中最上层。失焦、失去捕获或关闭面板时取消手势和吸附预览。`input()` 回复是否消费事件、获取或释放鼠标捕获、是否需要重绘。ImGui 适配器沿用宿主现有的输入投递链，画板在该上下文中处理局部命中，避免一次滚轮同时缩放波形和滚动宿主页面。[Dear ImGui 输入路由说明](https://github.com/ocornut/imgui/blob/master/docs/FAQ.md)
+## 单图交互
 
-### 拖放和恢复
+| 操作 | 响应 |
+| --- | --- |
+| 双指或右键拖动 | 由两个方向的位移分别控制 X、Y 缩放，右上看细节，左下看全貌 |
+| 左键拖动 | 实时平移 Y，暂停后平移 X/Y |
+| 双击绘图区 | 暂停或恢复显示，后台继续接收，恢复时跟上最新缓存 |
+| 宿主控件 | 调用与图内交互相同的配置入口，通过 `state()` 读取实际状态 |
 
-新增时平分当前窗，优先沿较长边分割。拖动标题时，可在画板内浮动。靠近另一窗的边缘预览该窗的半区，靠近画板外缘预览整个画板的一侧。只在松手时提交分割，每次分割保留各窗最小可操作空间。无可用停靠目标时保留浮动位置。拖动分隔线同时调整两边，退出拖动预览时保留原布局。Dear ImGui 已提供在宿主窗口局部定义停靠区的能力，可以用来验证交互手感。[Dear ImGui Docking](https://github.com/ocornut/imgui/wiki/Docking)
+原始双指位移向右、向上分别为正，按逻辑像素传给 `TouchpadDelta`。原生控件以子窗口接收位置、焦点、捕获和松开事件。宿主有自己的手势识别时可继续直接使用 C++ `WaveView`。
 
-布局记录版本、稳定面板 ID、分割方向与比例、浮动窗的相对位置、堆叠次序、通道键，以及手动或自动量程。通道键使用 `(source_id, stream_id, channel_id)`，同名通道可区分。恢复时缺席的通道显示为离线并保留绑定，稍后按键重连。首次启动及跨会话恢复均进入实时模式。采样数组、暂停快照和原生窗口句柄只活在当前进程。恢复失败时保留现有布局并返回原因。Qt 的布局恢复同样依赖唯一对象名，可作为稳定标识的参考。[Qt 布局保存与恢复](https://doc.qt.io/qt-6/qmainwindow.html#saveState)
+## 当前验证边界
 
-## 接入顺序和验收
-
-1. **先接一幅图。** 用现有 `Wave::view` 在宿主子区域显示一路真实数据。验证宿主控件仍能操作，移除视图后采集继续，返回页面可读到最新数据。
-2. **再实现画板。** 在 ImGui 演示程序中先跑通双窗、局部右键菜单、拖拽吸附和布局恢复。用同一数据源验证一窗暂停、另一窗继续滚动，拖窗不平移曲线，右拖缩放松开不弹菜单。对同名通道、失焦、窗口缩小、DPI 改变和关闭活动窗分别检查。
-3. **落实并发和预算。** 后台写入端使用稳定的流句柄。现有 `SignalHub::set_capacity_frames()` 可能替换数据池，工作线程不能跨调整持有裸指针。调整前预留新缓存，切换时与写入串行，并纳入准备期间已接受的批次。成功保留最新数据，失败保持原容量。每通道默认 50,000 帧，预算计入摘要、暂停快照和调整容量时的峰值。多个实时窗共享原始数据。用 20 通道 × 50 kSa/s、两窗同屏及反复冻结恢复，分别记录接收帧数、UI 帧耗时和内存峰值。
-4. **用实际宿主验收适配器。** 宿主选型后验证挂载、重绘、输入捕获、隐藏恢复和销毁。用独立采集线程在页面隐藏期间持续供数，随后验证序号连续、缓存按容量覆盖和视图恢复。Qt、.NET 等框架的适配以该宿主内的运行结果验收。
+已用 Windows C++/Win32、Python/Tkinter 验证父窗口内挂载、后台批量写入、缩放、暂停恢复、改变尺寸和销毁。用户界面各自只有一块波形区，Demo 使用两通道模拟采样。PySide/Qt 等宿主选型后可复用相同数据入口，并验证对应框架的生命周期与重绘。

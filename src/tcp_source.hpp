@@ -100,25 +100,25 @@ class Receiver {
                 if(m.type==Data) {
                     if(store.reception_time()) throw std::runtime_error("Receiver time requires DATA_NOW");
                     const auto first=r.u64(); const auto count=r.u32();
-                    if(!count || count>4096 || first<source.next || first>std::numeric_limits<std::uint64_t>::max()-count) throw std::runtime_error("Invalid count or sequence");
+                    if(!count || count>4096) throw std::runtime_error("Invalid count or sequence");
                     const auto n=std::size_t(count)*store.channels().size(); r.need(n*4);
                     std::vector<float> values; values.reserve(n);
                     for(std::size_t i=0;i<n;++i) values.push_back(r.f32()); r.end();
                     // Validate and commit before changing the mapping or sequence.
-                    store.append(first,values);
+                    const auto previous_next=source.next;
+                    hub_.append_frames(source,first,values);
                     if(!source.anchored) {
                         source.offset=session_time(session.arrival)-double(first+count-1)/store.sample_rate();
                         source.anchored=true;
                     }
-                    gaps+=first-source.next; source.next=first+count; frames+=count; ++batches; extra.u64(source.next);
+                    gaps+=first-previous_next; frames+=count; ++batches; extra.u64(source.next);
                 } else if(m.type==DataNow) {
                     if(!store.reception_time()) throw std::runtime_error("DATA_NOW requires receiver time registration");
                     std::vector<float> values;
                     for(std::size_t i=0;i<store.channels().size();++i) values.push_back(r.f32()); r.end();
-                    for(float v:values) if(!std::isfinite(v)) throw std::runtime_error("Samples must be finite");
                     const double timestamp=std::max(session_time(session.arrival),std::nextafter(source.last_time,std::numeric_limits<double>::infinity()));
-                    store.append_received(source.next,values,timestamp); source.last_time=timestamp; source.anchored=true;
-                    ++source.next; ++frames; ++batches; extra.u64(source.next); extra.f64(timestamp);
+                    hub_.append_received(source,values,timestamp);
+                    ++frames; ++batches; extra.u64(source.next); extra.f64(timestamp);
                 } else if(m.type==ClearChannel) {
                     const auto handle=r.u32(); r.end();
                     if(!handle || handle>store.channels().size()) throw std::runtime_error("Unknown channel handle");
