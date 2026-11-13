@@ -8,40 +8,19 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 endif()
-option(WAVE_BUILD_DEMO "Build the Win32/DX11 demo and TCP adapter" ${WAVE_STANDALONE})
-option(WAVE_BUILD_NATIVE "Build the C ABI / Python-compatible Windows component" ${WAVE_STANDALONE})
-option(WAVE_BUILD_HOST_DEMOS "Build the native C++ embedding demo" ${WAVE_STANDALONE})
+option(WAVE_BUILD_VIEW "Build the ImGui/ImPlot waveform view" ON)
+set(WAVE_WINDOWS_DEFAULT OFF)
+if(WAVE_STANDALONE AND WAVE_BUILD_VIEW)
+    set(WAVE_WINDOWS_DEFAULT ON)
+endif()
+option(WAVE_BUILD_DEMO "Build the Win32/DX11 demo and TCP adapter" ${WAVE_WINDOWS_DEFAULT})
+option(WAVE_BUILD_NATIVE "Build the C ABI / Python-compatible Windows component" ${WAVE_WINDOWS_DEFAULT})
+option(WAVE_BUILD_HOST_DEMOS "Build the native C++ embedding demo" ${WAVE_WINDOWS_DEFAULT})
+if((WAVE_BUILD_DEMO OR WAVE_BUILD_NATIVE) AND NOT WAVE_BUILD_VIEW)
+    message(FATAL_ERROR "The Windows display backends require WAVE_BUILD_VIEW=ON.")
+endif()
 if((WAVE_BUILD_DEMO OR WAVE_BUILD_NATIVE) AND NOT WIN32)
     message(FATAL_ERROR "Windows display backends require Windows. Disable WAVE_BUILD_DEMO and WAVE_BUILD_NATIVE to embed the portable core.")
-endif()
-
-# A parent may provide an existing compatible ImGui/ImPlot target to avoid
-# compiling a second copy. Otherwise use the pinned bundled dependencies.
-set(WAVE_PLOT_TARGET "" CACHE STRING "Existing target providing compatible ImGui and ImPlot")
-if(WAVE_PLOT_TARGET)
-    if(NOT TARGET "${WAVE_PLOT_TARGET}")
-        message(FATAL_ERROR "WAVE_PLOT_TARGET must name an existing target")
-    endif()
-    set(WAVE_PLOT_LINK "${WAVE_PLOT_TARGET}")
-else()
-    set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui-1.92.9b-docking" CACHE PATH "Dear ImGui source directory")
-    set(IMPLOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot-1.0" CACHE PATH "ImPlot source directory")
-    if(NOT EXISTS "${IMGUI_DIR}/imgui.cpp" OR NOT EXISTS "${IMPLOT_DIR}/implot.cpp")
-        message(FATAL_ERROR "Dependencies are missing. Run scripts/bootstrap.ps1 -SkipToolchain or provide WAVE_PLOT_TARGET.")
-    endif()
-    add_library(wave_plot STATIC
-        "${IMGUI_DIR}/imgui.cpp"
-        "${IMGUI_DIR}/imgui_draw.cpp"
-        "${IMGUI_DIR}/imgui_tables.cpp"
-        "${IMGUI_DIR}/imgui_widgets.cpp"
-        "${IMPLOT_DIR}/implot.cpp"
-        "${IMPLOT_DIR}/implot_items.cpp")
-    target_include_directories(wave_plot PUBLIC "${IMGUI_DIR}" "${IMPLOT_DIR}")
-    if(WIN32)
-        target_compile_definitions(wave_plot PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
-        target_link_libraries(wave_plot PUBLIC user32 imm32 shell32)
-    endif()
-    set(WAVE_PLOT_LINK wave_plot)
 endif()
 
 find_package(Threads REQUIRED)
@@ -49,12 +28,42 @@ add_library(wave_data STATIC src/data_core.cpp)
 target_include_directories(wave_data PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(wave_data PUBLIC Threads::Threads)
 add_library(Wave::data ALIAS wave_data)
-add_library(wave_view STATIC src/wave_view.cpp)
-target_link_libraries(wave_view PUBLIC wave_data "${WAVE_PLOT_LINK}")
-add_library(Wave::view ALIAS wave_view)
-set(WAVE_TARGETS wave_data wave_view)
-if(TARGET wave_plot)
-    list(APPEND WAVE_TARGETS wave_plot)
+set(WAVE_TARGETS wave_data)
+
+# A parent may provide an existing compatible ImGui/ImPlot target to avoid
+# compiling a second copy. Otherwise use the pinned bundled dependencies.
+if(WAVE_BUILD_VIEW)
+    set(WAVE_PLOT_TARGET "" CACHE STRING "Existing target providing compatible ImGui and ImPlot")
+    if(WAVE_PLOT_TARGET)
+        if(NOT TARGET "${WAVE_PLOT_TARGET}")
+            message(FATAL_ERROR "WAVE_PLOT_TARGET must name an existing target")
+        endif()
+        set(WAVE_PLOT_LINK "${WAVE_PLOT_TARGET}")
+    else()
+        set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui-1.92.9b-docking" CACHE PATH "Dear ImGui source directory")
+        set(IMPLOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot-1.0" CACHE PATH "ImPlot source directory")
+        if(NOT EXISTS "${IMGUI_DIR}/imgui.cpp" OR NOT EXISTS "${IMPLOT_DIR}/implot.cpp")
+            message(FATAL_ERROR "Dependencies are missing. Run scripts/bootstrap.ps1 -SkipToolchain or provide WAVE_PLOT_TARGET.")
+        endif()
+        add_library(wave_plot STATIC
+            "${IMGUI_DIR}/imgui.cpp"
+            "${IMGUI_DIR}/imgui_draw.cpp"
+            "${IMGUI_DIR}/imgui_tables.cpp"
+            "${IMGUI_DIR}/imgui_widgets.cpp"
+            "${IMPLOT_DIR}/implot.cpp"
+            "${IMPLOT_DIR}/implot_items.cpp")
+        target_include_directories(wave_plot PUBLIC "${IMGUI_DIR}" "${IMPLOT_DIR}")
+        if(WIN32)
+            target_compile_definitions(wave_plot PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+            target_link_libraries(wave_plot PUBLIC user32 imm32 shell32)
+        endif()
+        set(WAVE_PLOT_LINK wave_plot)
+        list(APPEND WAVE_TARGETS wave_plot)
+    endif()
+    add_library(wave_view STATIC src/wave_view.cpp)
+    target_link_libraries(wave_view PUBLIC wave_data "${WAVE_PLOT_LINK}")
+    add_library(Wave::view ALIAS wave_view)
+    list(APPEND WAVE_TARGETS wave_view)
 endif()
 
 if(WAVE_BUILD_DEMO OR WAVE_BUILD_NATIVE)

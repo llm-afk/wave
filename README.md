@@ -2,6 +2,8 @@
 
 C++20 / Dear ImGui / ImPlot。独立演示程序使用 Windows / DirectX 11。
 
+当前重点是单图多通道组件的最小架构。模块职责、数据契约、线程归属和后续调整点见 [最小组件架构](docs/EMBEDDING.md#最小组件架构)。
+
 第一阶段保留单图实时显示、坐标轴、通道名称与颜色、采样点、有界环形缓存、按像素降采样和批量数据的平滑显示时钟。数据显示采用原始采样或首点/最小值/最大值/末点摘要，缩小时保留尖峰，绘图区边缘保留相邻真实点以裁剪连线。
 
 支持轴区域和绘图区滚轮缩放、右键拖动缩放、左键平移和双击暂停。演示程序显示单一实时波形，绘图组件由宿主安排布局，图例显示名称和颜色。
@@ -95,7 +97,14 @@ add_subdirectory(path/to/wave)
 target_link_libraries(MyHost PRIVATE Wave::view)
 ```
 
-`Wave::data` 是无 GUI 的数据层。独立演示程序和示例数据源使用 Winsock；仅链接 `Wave::view` 不会带入 TCP 接收器、Win32/DX11 后端或示例采集程序。
+`Wave::data` 的依赖为 C++ 标准库和线程支持。`Wave::view` 在其上链接 ImGui/ImPlot，TCP 接收器与 Win32/DX11 后端由独立程序或 Windows 组件目标组合。
+
+只构建数据缓存、校验与查询时，可在新的构建目录关闭视图。
+
+```powershell
+cmake -S . -B build/data-only -DWAVE_BUILD_VIEW=OFF
+cmake --build build/data-only --config Release
+```
 
 默认使用固定版本的 ImGui v1.92.9b-docking / ImPlot v1.0。若宿主已有兼容的 ImGui/ImPlot 合并目标，在 `add_subdirectory` 前设置 `WAVE_PLOT_TARGET` 为该目标名，以避免编译第二份 GUI 库；它须公开这两个库的头文件与链接依赖。组件使用该固定版本的 ImPlotSpec API，升级需要验证兼容性。
 
