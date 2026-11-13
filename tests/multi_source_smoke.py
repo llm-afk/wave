@@ -57,7 +57,7 @@ try:
     assert report["sources"] == 2 and report["channels"] >= 3, report
     assert report["tcp_frames"] > 1000 and report["tcp_rejected"] == 0, report
     assert not report["render_failed"] and report["presented_frames"] > 0, report
-    assert report["max_submitted_plot_points"] == 0, "Receiving must not auto-select signals"
+    assert report["max_submitted_plot_points"] > 0, "Registered signals must display automatically"
     print("PASS native simultaneous system/audio reception:", report)
 finally:
     if "--play-sound" in sys.argv:

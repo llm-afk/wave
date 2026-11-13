@@ -10,11 +10,15 @@ CPU temperature is not fabricated. CPU usage uses differences of GetSystemTimes
 (kernel includes idle). On machines with more than 64 logical processors this
 API is limited to the caller's primary processor group.
 
-The initial window selects no channels. Receiving data never changes selection. Select CPU usage or Memory usage in the panel's
-context menu or add another panel. Freeze and zoom work as before, reception
-continues in the background. The title stays simply Wave; the selection menu
-shows data names, with update status in hover hints. This source can run alongside
-`run-audio-source.cmd` in the same Wave instance.
+Registered channels start at the left of a ten-second plot and scroll once it fills.
+Auto Y fits the visible percentage readings to 80% of the plot height.
+Wheel/right-drag zoom is available on the axes and plot, while live
+following continues. Left drag pans Y live and both axes while paused. Double
+click holds the display while reception continues, then resumes at the latest
+cache. The time axis follows the original acquisition timeline in seconds.
+There are no settings menus or additional panels. Embedding hosts set
+ranges and channel visibility through WaveView's API. The title stays Wave.
+This source can run alongside `run-audio-source.cmd` in the same Wave instance.
 
 For batching: `run-source.cmd 5` sends five sample groups per
 message (one second of data). Default batch size 1 sends every 200 ms.

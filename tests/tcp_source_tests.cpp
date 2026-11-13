@@ -1,8 +1,12 @@
 #include "tcp_source.hpp"
 #include <future>
 #include <iostream>
+#include <source_location>
 using namespace wave;
-void require(bool ok) {if(!ok) throw std::runtime_error("TCP integration assertion failed");}
+void require(bool ok, std::source_location where = std::source_location::current()) {
+    if(!ok) throw std::runtime_error("TCP integration assertion failed at line " +
+        std::to_string(where.line()) + " (WSA=" + std::to_string(WSAGetLastError()) + ")");
+}
 void receiver_time_test() {
     DataStore store(1,32,{}); tcp::Receiver receiver(store,0); std::atomic<bool> stop{false};
     auto work=std::async(std::launch::async,[&]{

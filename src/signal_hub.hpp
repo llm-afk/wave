@@ -22,6 +22,9 @@ class SignalSnapshot {
     std::vector<double> offsets_;
     std::vector<SignalBinding> bindings_;
 public:
+    double sample_rate(std::size_t channel) const {
+        return data_.at(bindings_.at(channel).source).sample_rate();
+    }
     DataRange channel_range(std::size_t channel, std::uint64_t cutoff=0) const {
         if(channel>=bindings_.size()) return {};
         const auto b=bindings_[channel]; const auto& data=data_[b.source]; auto r=data.range();
@@ -32,10 +35,10 @@ public:
     DataRange range() const {
         DataRange r; for(std::size_t i=0;i<bindings_.size();++i) r=merge_ranges(r,channel_range(i)); return r;
     }
-    std::vector<PlotPoint> query(std::size_t channel,double begin,double end,std::size_t width,std::uint64_t cutoff=0) const {
+    std::vector<PlotPoint> query(std::size_t channel,double begin,double end,std::size_t width,std::uint64_t cutoff=0,bool include_neighbors=false) const {
         if(channel>=bindings_.size()) return {};
         const auto b=bindings_[channel]; const double offset=offsets_[b.source];
-        auto points=data_[b.source].query(b.channel,begin-offset,end-offset,width,cutoff);
+        auto points=data_[b.source].query(b.channel,begin-offset,end-offset,width,cutoff,include_neighbors);
         for(auto& p:points) p.t+=offset;
         return points;
     }
@@ -58,7 +61,7 @@ private:
     std::vector<std::unique_ptr<Source>> sources_;
     std::vector<ChannelInfo> channels_;
     std::vector<SignalBinding> bindings_;
-    std::size_t capacity_=100000;
+    std::size_t capacity_=default_capacity_frames;
     DataStore* legacy_=nullptr;
 public:
     SignalHub()=default;
@@ -69,6 +72,13 @@ public:
     bool legacy() const {return legacy_!=nullptr;}
     void sync() {
         if(legacy_) capacity_=legacy_->capacity_frames();
+        if(legacy_ && sources_.size()==1) {
+            const auto& metadata=legacy_->channels();
+            if(metadata.size()==channels_.size() &&
+               std::equal(metadata.begin(),metadata.end(),channels_.begin(),[](const auto& a,const auto& b) {
+                   return a.name==b.name && a.unit==b.unit && a.id==b.id;
+               })) return;
+        }
         channels_.clear(); bindings_.clear();
         for(std::size_t i=0;i<sources_.size();++i) {
             const auto& c=sources_[i]->data->channels();
@@ -128,10 +138,10 @@ public:
     DataRange range() const {
         DataRange r; for(std::size_t i=0;i<channels_.size();++i) r=merge_ranges(r,channel_range(i)); return r;
     }
-    std::vector<PlotPoint> query(std::size_t channel,double begin,double end,std::size_t width,std::uint64_t cutoff=0) const {
+    std::vector<PlotPoint> query(std::size_t channel,double begin,double end,std::size_t width,std::uint64_t cutoff=0,bool include_neighbors=false) const {
         if(channel>=bindings_.size()) return {};
         const auto b=bindings_[channel]; const auto& s=*sources_[b.source];
-        auto points=s.data->query(b.channel,begin-s.offset,end-s.offset,width,cutoff);
+        auto points=s.data->query(b.channel,begin-s.offset,end-s.offset,width,cutoff,include_neighbors);
         for(auto& p:points) p.t+=s.offset; return points;
     }
     SignalSnapshot snapshot(double begin,double end) const {

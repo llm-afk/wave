@@ -48,7 +48,7 @@ try {
 
     # Headers are few; a shared latest timestamp also handles transitive includes.
     $latestHeaderTime = [DateTime]::MinValue
-    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), $imguiDirectory, $implotDirectory)) {
+    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), (Join-Path $projectRoot 'tests'), $imguiDirectory, $implotDirectory)) {
         if (Test-Path -LiteralPath $headerRoot -PathType Container) {
             foreach ($header in Get-ChildItem -LiteralPath $headerRoot -Recurse -File | Where-Object { $_.Extension -in @('.h', '.hpp', '.inl') }) {
                 if ($header.LastWriteTimeUtc -gt $latestHeaderTime) { $latestHeaderTime = $header.LastWriteTimeUtc }
@@ -118,26 +118,26 @@ try {
         Link-Executable $tcpTest @($coreObject, (Build-Object 'tests/tcp_source_tests.cpp')) @('-lws2_32')
         & $tcpTest
         if ($LASTEXITCODE -ne 0) { throw 'TCP source tests failed.' }
-        $testObjects = @($coreObject, (Build-Object 'tests/data_core_tests.cpp'))
+        $testObjects = @($coreObject, (Build-Object 'tests/data_core_tests.cpp'), (Build-Object 'tests/simulation_source.cpp'))
         $testExecutable = Join-Path $buildDirectory 'data_core_tests.exe'
         Link-Executable $testExecutable $testObjects @()
         Write-Host 'Running data core tests...'
         & $testExecutable
         if ($LASTEXITCODE -ne 0) { throw "Data core tests failed (exit $LASTEXITCODE)." }
 
-        $navigationObjects = @((Build-Object 'tests/plot_navigation_tests.cpp'))
-        $navigationExecutable = Join-Path $buildDirectory 'plot_navigation_tests.exe'
-        Link-Executable $navigationExecutable $navigationObjects @()
-        Write-Host 'Running plot navigation tests...'
-        & $navigationExecutable
-        if ($LASTEXITCODE -ne 0) { throw "Plot navigation tests failed (exit $LASTEXITCODE)." }
+        $clockObjects = @((Build-Object 'tests/display_clock_tests.cpp'))
+        $clockExecutable = Join-Path $buildDirectory 'display_clock_tests.exe'
+        Link-Executable $clockExecutable $clockObjects @()
+        Write-Host 'Running display clock tests...'
+        & $clockExecutable
+        if ($LASTEXITCODE -ne 0) { throw "Display clock tests failed (exit $LASTEXITCODE)." }
 
-        $interactionObjects = $viewObjects + @((Build-Object 'tests/view_interaction_tests.cpp'))
-        $interactionExecutable = Join-Path $buildDirectory 'view_interaction_tests.exe'
-        Link-Executable $interactionExecutable $interactionObjects @('-luser32', '-limm32', '-lshell32')
-        Write-Host 'Running headless view interaction tests...'
-        & $interactionExecutable
-        if ($LASTEXITCODE -ne 0) { throw "View interaction tests failed (exit $LASTEXITCODE)." }
+        $viewTestObjects = $viewObjects + @((Build-Object 'tests/view_tests.cpp'))
+        $viewTestExecutable = Join-Path $buildDirectory 'view_tests.exe'
+        Link-Executable $viewTestExecutable $viewTestObjects @('-luser32', '-limm32', '-lshell32')
+        Write-Host 'Running headless view tests...'
+        & $viewTestExecutable
+        if ($LASTEXITCODE -ne 0) { throw "View tests failed (exit $LASTEXITCODE)." }
     }
 
     [IO.File]::WriteAllText($configurationFile, $configuration)

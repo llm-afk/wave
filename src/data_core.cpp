@@ -2,15 +2,11 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <chrono>
 #include <cmath>
 #include <deque>
 #include <limits>
 #include <mutex>
-#include <numbers>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 
 namespace wave {
@@ -63,6 +59,15 @@ struct SampleStorage {
 
     double time(std::uint64_t frame) const {
         return reception_time ? times[frame % capacity] : static_cast<double>(frame) / sample_rate;
+    }
+    std::uint64_t time_bound(std::uint64_t lo, std::uint64_t hi, double t, bool upper = false) const {
+        while (lo < hi) {
+            const auto mid = lo + (hi - lo) / 2;
+            const double stamp = time(mid);
+            if (stamp < t || (upper && stamp == t)) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
     DataRange range() const {
         if (!count) return {};
@@ -126,7 +131,8 @@ struct SampleStorage {
         if (!gaps.empty()) gaps.front().first = std::max(gaps.front().first, first_frame);
     }
 
-    std::pair<std::uint64_t, std::uint64_t> interval(double tmin, double tmax) const {
+    std::pair<std::uint64_t, std::uint64_t> interval(double tmin, double tmax,
+                                                  bool include_neighbors = false) const {
         if (!count || std::isnan(tmin) || std::isnan(tmax) || tmin > tmax)
             return {0, 0};
         const auto available = range();
@@ -134,34 +140,48 @@ struct SampleStorage {
         std::uint64_t first = first_frame;
         std::uint64_t end = next_frame;
         if (reception_time) {
-            auto bound = [&](double t, bool upper) {
-                auto lo = first_frame, hi = next_frame;
-                while (lo < hi) {
-                    const auto mid = lo + (hi - lo) / 2;
-                    if (time(mid) < t || (upper && time(mid) == t)) lo = mid + 1;
-                    else hi = mid;
-                }
-                return lo;
+            first = time_bound(first_frame, next_frame, tmin);
+            end = time_bound(first, next_frame, tmax, true);
+        } else {
+            // Accommodate round-off when a timestamp returned by range/query is
+            // passed back into this API. This tolerance is far below one sample.
+            const auto tolerance = [](long double x) {
+                return 8 * std::numeric_limits<double>::epsilon() *
+                       std::max(1.0L, std::abs(x));
             };
-            first = bound(tmin, false); end = bound(tmax, true);
-            return {first, end};
-        }
-        // Accommodate round-off when a timestamp returned by range/query is
-        // passed back into this API. This tolerance is far below one sample.
-        const auto tolerance = [](long double x) {
-            return 8 * std::numeric_limits<double>::epsilon() *
-                   std::max(1.0L, std::abs(x));
-        };
-        if (tmin > available.begin) {
-            const long double scaled = static_cast<long double>(tmin) * sample_rate;
-            first = static_cast<std::uint64_t>(std::ceil(scaled - tolerance(scaled)));
-        }
-        if (tmax < available.end) {
-            const long double scaled = static_cast<long double>(tmax) * sample_rate;
-            end = static_cast<std::uint64_t>(std::floor(scaled + tolerance(scaled))) + 1;
+            if (tmin > available.begin) {
+                const long double scaled = static_cast<long double>(tmin) * sample_rate;
+                first = static_cast<std::uint64_t>(std::ceil(scaled - tolerance(scaled)));
+            }
+            if (tmax < available.end) {
+                const long double scaled = static_cast<long double>(tmax) * sample_rate;
+                end = static_cast<std::uint64_t>(std::floor(scaled + tolerance(scaled))) + 1;
+            }
         }
         first = std::clamp(first, first_frame, next_frame);
         end = std::clamp(end, first_frame, next_frame);
+        if (include_neighbors) {
+            // Step to real samples, skipping missing timeline slots in one jump.
+            // Expanding before the empty check also covers a view between samples.
+            const auto containing_gap = [&](std::uint64_t frame) {
+                auto it = std::upper_bound(gaps.begin(), gaps.end(), frame,
+                    [](auto index, const auto& gap) { return index < gap.first; });
+                if (it != gaps.begin()) {
+                    --it;
+                    if (frame < it->second) return it;
+                }
+                return gaps.end();
+            };
+            if (first > first_frame) {
+                --first;
+                if (const auto gap = containing_gap(first); gap != gaps.end())
+                    first = gap->first > first_frame ? gap->first - 1 : first_frame;
+            }
+            if (end < next_frame) {
+                if (const auto gap = containing_gap(end); gap != gaps.end()) end = gap->second;
+                if (end < next_frame) ++end;
+            }
+        }
         return first < end ? std::pair{first, end} : std::pair<std::uint64_t, std::uint64_t>{0, 0};
     }
 
@@ -199,9 +219,10 @@ struct SampleStorage {
     }
 
     std::vector<PlotPoint> query(std::size_t channel, double tmin, double tmax,
-                                  std::size_t pixel_width, std::uint64_t cutoff = 0) const {
+                                  std::size_t pixel_width, std::uint64_t cutoff = 0,
+                                  bool include_neighbors = false) const {
         if (channel >= channels.size()) throw std::out_of_range("Invalid channel index");
-        auto [first, end] = interval(tmin, tmax);
+        auto [first, end] = interval(tmin, tmax, include_neighbors);
         first = std::max(first, cutoff);
         if (first >= end) return {};
         const auto n = static_cast<std::size_t>(end - first);
@@ -217,16 +238,34 @@ struct SampleStorage {
             return result;
         }
         result.reserve(pixels * 4);
-        // Integer bin arithmetic avoids timestamp drift and duplicate bins.
-        for (std::size_t bin = 0; bin < pixels; ++bin) {
-            const auto lo = first + (n / pixels) * bin + (n % pixels) * bin / pixels;
-            const auto hi = first + (n / pixels) * (bin + 1) +
-                            (n % pixels) * (bin + 1) / pixels;
+        const auto push_bin = [&](std::uint64_t lo, std::uint64_t hi) {
             const auto summary = extremes(channel, lo, hi);
             std::array<std::uint64_t, 4> indices{lo, summary.min_frame, summary.max_frame, hi - 1};
             std::sort(indices.begin(), indices.end());
             const auto unique_end = std::unique(indices.begin(), indices.end());
             for (auto it = indices.begin(); it != unique_end; ++it) push(*it);
+        };
+        if (reception_time) {
+            // Bucket by time so a burst cannot discard isolated samples elsewhere in the view.
+            const double start = std::max(tmin, time(first));
+            const double stop = std::min(tmax, time(end - 1));
+            auto lo = first;
+            for (std::size_t bin = 1; bin < pixels; ++bin) {
+                const double boundary = std::lerp(start, stop, static_cast<double>(bin) / pixels);
+                if (time(lo) >= boundary) continue;
+                const auto hi = time_bound(lo + 1, end, boundary);
+                push_bin(lo, hi);
+                lo = hi;
+            }
+            push_bin(lo, end);
+        } else {
+            // Integer bin arithmetic avoids timestamp drift on uniform streams.
+            auto lo = first;
+            for (std::size_t bin = 1; bin <= pixels; ++bin) {
+                const auto hi = first + (n / pixels) * bin + (n % pixels) * bin / pixels;
+                push_bin(lo, hi);
+                lo = hi;
+            }
         }
         // Keep the real endpoints on either side of a gap even after decimation.
         // Missing slots are omitted, so renderers connect across the gap.
@@ -265,18 +304,16 @@ struct DataStore::Impl {
     mutable std::mutex mutex;
     detail::SampleStorage storage;
     std::vector<std::uint64_t> cleared;
-    Impl(double rate, double seconds, std::vector<ChannelInfo> metadata)
-        : storage(rate, checked_capacity(rate, seconds, metadata.size()), metadata), cleared(metadata.size()) {}
+    Impl(double rate, std::size_t capacity, const std::vector<ChannelInfo>& metadata)
+        : storage(rate, capacity, metadata), cleared(metadata.size()) {}
 };
 
-std::vector<ChannelInfo> simulation_channels() {
-    return {{"Phase A", "A"}, {"Phase B", "A"}, {"Phase C", "A"},
-            {"PWM monitor", "V"}, {"Triangle", "V"}, {"Modulated", "A"},
-            {"Single-sample spikes", "A"}, {"Noise + ripple", "V"}};
+DataStore::DataStore(double rate) {
+    if (!std::isfinite(rate) || rate <= 0) throw std::invalid_argument("Sample rate must be finite and positive");
+    impl_ = std::make_unique<Impl>(rate, default_capacity_frames, std::vector<ChannelInfo>{});
 }
-
 DataStore::DataStore(double rate, double seconds, std::vector<ChannelInfo> channels)
-    : impl_(std::make_unique<Impl>(rate, seconds, std::move(channels))) {}
+    : impl_(std::make_unique<Impl>(rate, checked_capacity(rate, seconds, channels.size()), channels)) {}
 DataStore::~DataStore() = default;
 void DataStore::configure(double rate, std::vector<ChannelInfo> channels, bool reception_time) {
     if (!std::isfinite(rate) || (reception_time ? rate != 0 : rate <= 0) || channels.empty() || channels.size() > 64)
@@ -381,10 +418,12 @@ void DataStore::clear() {
 }
 
 std::vector<PlotPoint> DataStore::query(std::size_t channel, double tmin, double tmax,
-                                      std::size_t pixel_width, std::uint64_t first_frame) const {
+                                      std::size_t pixel_width, std::uint64_t first_frame,
+                                      bool include_neighbors) const {
     const std::lock_guard lock(impl_->mutex);
     if (channel >= impl_->cleared.size()) return {};
-    return impl_->storage.query(channel, tmin, tmax, pixel_width, std::max(first_frame, impl_->cleared[channel]));
+    return impl_->storage.query(channel, tmin, tmax, pixel_width,
+                                std::max(first_frame, impl_->cleared[channel]), include_neighbors);
 }
 
 FrozenData DataStore::snapshot(double tmin, double tmax) const {
@@ -445,120 +484,11 @@ std::unique_ptr<DataStore> DataStore::resized_copy(std::size_t frames) const {
     return result;
 }
 std::vector<PlotPoint> FrozenData::query(std::size_t channel, double tmin, double tmax,
-                                      std::size_t pixel_width, std::uint64_t first_frame) const {
+                                      std::size_t pixel_width, std::uint64_t first_frame,
+                                      bool include_neighbors) const {
     if (!storage_) return {};
     if (channel < cleared_.size()) first_frame = std::max(first_frame, cleared_[channel]);
-    return storage_->query(channel, tmin, tmax, pixel_width, first_frame);
-}
-
-struct SimulationSource::Impl {
-    DataStore& store;
-    std::jthread worker;
-    std::atomic<bool> is_running{false};
-    std::atomic<std::uint64_t> produced{0};
-    std::atomic<std::uint64_t> skipped{0};
-    std::atomic<double> elapsed{0};
-
-    explicit Impl(DataStore& target) : store(target) {}
-
-    static float signal(std::size_t channel, std::uint64_t frame, double rate) {
-        constexpr double pi = std::numbers::pi;
-        const double t = static_cast<double>(frame) / rate;
-        const double phase = 2 * pi * 50 * t;
-        switch (channel % 8) {
-        case 0: return static_cast<float>(8 * std::sin(phase));
-        case 1: return static_cast<float>(8 * std::sin(phase - 2 * pi / 3));
-        case 2: return static_cast<float>(8 * std::sin(phase + 2 * pi / 3));
-        case 3: return std::fmod(t * 1000, 1.0) < 0.35 ? 6.0f : -6.0f;
-        case 4: return static_cast<float>(5 * (1 - 4 * std::abs(std::fmod(t * 15, 1.0) - 0.5)));
-        case 5: return static_cast<float>((3 + 2 * std::sin(2 * pi * 0.4 * t)) * std::sin(phase));
-        case 6: {
-            const auto period = std::max(std::uint64_t{4}, static_cast<std::uint64_t>(rate));
-            const auto position = frame % period;
-            const double impulse = position == period / 2 ? 18.0 :
-                                   position == period / 2 + 1 ? -18.0 : 0.0;
-            return static_cast<float>(3 * std::sin(phase) + impulse);
-        }
-        default: {
-            // Deterministic integer hashing: no shared RNG state or allocation.
-            auto bits = frame + 0x9e3779b97f4a7c15ULL;
-            bits = (bits ^ (bits >> 30)) * 0xbf58476d1ce4e5b9ULL;
-            bits = (bits ^ (bits >> 27)) * 0x94d049bb133111ebULL;
-            bits ^= bits >> 31;
-            const double noise = static_cast<double>(bits & 0xFFFF) / 32767.5 - 1;
-            return static_cast<float>(0.55 * noise + 0.7 * std::sin(2 * pi * 850 * t));
-        }
-        }
-    }
-
-    void run(std::stop_token stop) {
-        using clock = std::chrono::steady_clock;
-        const auto initial_range = store.range();
-        const auto base = initial_range.empty ? 0 : initial_range.last_frame + 1;
-        const auto channel_count = store.channels().size();
-        const double rate = store.sample_rate();
-        const auto max_catchup = std::max(std::uint64_t{1}, static_cast<std::uint64_t>(rate * 0.1));
-        std::vector<float> batch(static_cast<std::size_t>(max_catchup) * channel_count);
-        const auto start = clock::now();
-        auto wake = start;
-        std::uint64_t generated = 0;
-        while (!stop.stop_requested()) {
-            const double seconds = std::chrono::duration<double>(clock::now() - start).count();
-            elapsed.store(seconds, std::memory_order_relaxed);
-            const auto target = static_cast<std::uint64_t>(seconds * rate);
-            if (target > generated) {
-                if (target - generated > max_catchup) {
-                    const auto missed = target - generated - max_catchup;
-                    skipped.fetch_add(missed, std::memory_order_relaxed);
-                    generated += missed;
-                }
-                const auto frames = static_cast<std::size_t>(target - generated);
-                for (std::size_t i = 0; i < frames; ++i)
-                    for (std::size_t ch = 0; ch < channel_count; ++ch)
-                        batch[i * channel_count + ch] = signal(ch, base + generated + i, rate);
-                store.append(base + generated, std::span<const float>(batch.data(), frames * channel_count));
-                produced.fetch_add(frames, std::memory_order_relaxed);
-                generated = target;
-            }
-            wake += std::chrono::milliseconds(5);
-            // After an OS pause, schedule forward rather than busy-looping
-            // through old wake times. Missing samples are counted explicitly.
-            const auto now = clock::now();
-            if (wake < now) wake = now + std::chrono::milliseconds(5);
-            std::this_thread::sleep_until(wake);
-        }
-        elapsed.store(std::chrono::duration<double>(clock::now() - start).count(), std::memory_order_relaxed);
-        is_running.store(false, std::memory_order_release);
-    }
-};
-
-SimulationSource::SimulationSource(DataStore& store) : impl_(std::make_unique<Impl>(store)) {}
-SimulationSource::~SimulationSource() { stop(); }
-void SimulationSource::start() {
-    if (impl_->worker.joinable()) return;
-    impl_->produced = 0;
-    impl_->skipped = 0;
-    impl_->elapsed = 0;
-    impl_->is_running.store(true, std::memory_order_release);
-    try {
-        impl_->worker = std::jthread([this](std::stop_token stop) { impl_->run(stop); });
-    } catch (...) {
-        impl_->is_running.store(false, std::memory_order_release);
-        throw;
-    }
-}
-void SimulationSource::stop() {
-    if (impl_->worker.joinable()) {
-        impl_->worker.request_stop();
-        impl_->worker.join();
-    }
-    impl_->is_running.store(false, std::memory_order_release);
-}
-bool SimulationSource::running() const { return impl_->is_running.load(std::memory_order_acquire); }
-SourceStats SimulationSource::stats() const {
-    return {impl_->produced.load(std::memory_order_relaxed),
-            impl_->skipped.load(std::memory_order_relaxed),
-            impl_->elapsed.load(std::memory_order_relaxed)};
+    return storage_->query(channel, tmin, tmax, pixel_width, first_frame, include_neighbors);
 }
 
 } // namespace wave

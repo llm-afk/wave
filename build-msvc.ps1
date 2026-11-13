@@ -93,7 +93,7 @@ try {
     if (-not $forceRebuild) { $forceRebuild = [IO.File]::ReadAllText($configurationFile) -ne $configuration }
 
     $latestHeaderTime = [DateTime]::MinValue
-    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), $imguiDirectory, $implotDirectory)) {
+    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), (Join-Path $projectRoot 'tests'), $imguiDirectory, $implotDirectory)) {
         if (Test-Path -LiteralPath $headerRoot -PathType Container) {
             foreach ($header in Get-ChildItem -LiteralPath $headerRoot -Recurse -File | Where-Object { $_.Extension -in @('.h', '.hpp', '.inl') }) {
                 if ($header.LastWriteTimeUtc -gt $latestHeaderTime) { $latestHeaderTime = $header.LastWriteTimeUtc }
@@ -135,7 +135,7 @@ try {
     }
 
     $coreObject = Build-MsvcObject 'src/data_core.cpp'
-    # The same view/plot objects serve the app and headless interaction tests.
+    # The same view/plot objects serve the app and headless view tests.
     # TestOnly does not compile the Win32 or DirectX renderer backends.
     $viewObjects = @($coreObject)
     foreach ($source in @(
@@ -164,26 +164,26 @@ try {
         Link-MsvcExecutable $tcpTest @($coreObject, (Build-MsvcObject 'tests/tcp_source_tests.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
         & $tcpTest
         if ($LASTEXITCODE -ne 0) { throw 'TCP source tests failed.' }
-        $testObjects = @($coreObject, (Build-MsvcObject 'tests/data_core_tests.cpp'))
+        $testObjects = @($coreObject, (Build-MsvcObject 'tests/data_core_tests.cpp'), (Build-MsvcObject 'tests/simulation_source.cpp'))
         $testExecutable = Join-Path $buildDirectory 'data_core_tests.exe'
         Link-MsvcExecutable $testExecutable $testObjects @('/SUBSYSTEM:CONSOLE')
         Write-Host 'Running data core tests...'
         & $testExecutable | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "Data core tests failed (exit $LASTEXITCODE)." }
 
-        $navigationObjects = @((Build-MsvcObject 'tests/plot_navigation_tests.cpp'))
-        $navigationExecutable = Join-Path $buildDirectory 'plot_navigation_tests.exe'
-        Link-MsvcExecutable $navigationExecutable $navigationObjects @('/SUBSYSTEM:CONSOLE')
-        Write-Host 'Running plot navigation tests...'
-        & $navigationExecutable | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Plot navigation tests failed (exit $LASTEXITCODE)." }
+        $clockObjects = @((Build-MsvcObject 'tests/display_clock_tests.cpp'))
+        $clockExecutable = Join-Path $buildDirectory 'display_clock_tests.exe'
+        Link-MsvcExecutable $clockExecutable $clockObjects @('/SUBSYSTEM:CONSOLE')
+        Write-Host 'Running display clock tests...'
+        & $clockExecutable | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Display clock tests failed (exit $LASTEXITCODE)." }
 
-        $interactionObjects = $viewObjects + @((Build-MsvcObject 'tests/view_interaction_tests.cpp'))
-        $interactionExecutable = Join-Path $buildDirectory 'view_interaction_tests.exe'
-        Link-MsvcExecutable $interactionExecutable $interactionObjects @('/SUBSYSTEM:CONSOLE', 'user32.lib', 'imm32.lib', 'shell32.lib')
-        Write-Host 'Running headless view interaction tests...'
-        & $interactionExecutable | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "View interaction tests failed (exit $LASTEXITCODE)." }
+        $viewTestObjects = $viewObjects + @((Build-MsvcObject 'tests/view_tests.cpp'))
+        $viewTestExecutable = Join-Path $buildDirectory 'view_tests.exe'
+        Link-MsvcExecutable $viewTestExecutable $viewTestObjects @('/SUBSYSTEM:CONSOLE', 'user32.lib', 'imm32.lib', 'shell32.lib')
+        Write-Host 'Running headless view tests...'
+        & $viewTestExecutable | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "View tests failed (exit $LASTEXITCODE)." }
     }
     [IO.File]::WriteAllText($configurationFile, $configuration)
     Write-Host 'MSVC build completed.' -ForegroundColor Green

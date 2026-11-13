@@ -155,7 +155,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     ImGui::CreateContext();
     ImPlot::CreateContext();
     auto& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.IniFilename = nullptr; // This minimal demo starts with a predictable layout.
     const char* font = "C:\\Windows\\Fonts\\msyh.ttc";
@@ -167,7 +166,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     ImGui_ImplDX11_Init(device, device_context);
 
     wave::SignalHub data;
-    wave::WaveView view(data, 30.0);
+    wave::WaveView view(data);
     std::unique_ptr<wave::tcp::Receiver> receiver;
     auto retry_listener_at = std::chrono::steady_clock::time_point{};
     ShowWindow(window, SW_SHOWDEFAULT);
@@ -177,6 +176,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     bool render_failed = false;
     std::size_t frame_count = 0, max_points = 0, presented_frames = 0;
     std::size_t move_size_frames = 0;
+    std::size_t empty_draw_frames = 0, minimum_draw_vertices = static_cast<std::size_t>(-1);
     double frame_work_ms = 0;
     const auto started = std::chrono::steady_clock::now();
     bool rendering = false;
@@ -221,9 +221,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-        view.set_source_connected(receiver && receiver->connected.load());
-        view.draw();
+        const auto* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        if (ImGui::Begin("Wave", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+            view.draw();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
         ImGui::Render();
+        const auto vertices = static_cast<std::size_t>(ImGui::GetDrawData()->TotalVtxCount);
+        minimum_draw_vertices = std::min(minimum_draw_vertices, vertices);
+        if (vertices == 0) ++empty_draw_frames;
         const float clear[] = {0, 0, 0, 1};
         device_context->OMSetRenderTargets(1, &render_target, nullptr);
         device_context->ClearRenderTargetView(render_target, clear);
@@ -268,6 +280,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
             << ",\n  \"sources\": " << data.source_count()
             << ",\n  \"tcp_gaps\": " << (receiver ? receiver->gaps.load() : 0)
             << ",\n  \"rendered_frames\": " << frame_count
+            << ",\n  \"empty_draw_frames\": " << empty_draw_frames
+            << ",\n  \"minimum_draw_vertices\": " << (frame_count ? minimum_draw_vertices : 0)
             << ",\n  \"move_size_frames\": " << move_size_frames
             << ",\n  \"elapsed_seconds\": " << elapsed
             << ",\n  \"average_render_loop_fps\": " << frame_count / std::max(0.001, elapsed)

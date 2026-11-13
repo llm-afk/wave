@@ -1,6 +1,8 @@
 #include "data_core.hpp"
+#include "simulation_source.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -234,7 +236,7 @@ void resize_retains_latest_and_snapshot() {
 }
 
 void source_lifecycle_and_concurrent_queries() {
-    wave::DataStore store(20000, 0.2);
+    wave::DataStore store(20000, 0.2, wave::simulation_channels());
     wave::SimulationSource source(store);
     source.start();
     source.start(); // Idempotent: must not spawn a second producer.
@@ -265,10 +267,81 @@ void source_lifecycle_and_concurrent_queries() {
     source.stop();
     require(store.range().last_frame > stopped_frame, "Restart must resume the source timeline");
 }
+void connected_view_queries() {
+    const auto expect_times = [](const auto& points, const std::vector<double>& times) {
+        require(points.size() == times.size(), "Connected query must retain the expected real samples");
+        for (std::size_t i = 0; i < times.size(); ++i)
+            require(std::abs(points[i].t - times[i]) < 1e-12 && std::isfinite(points[i].value),
+                    "Connected query must preserve real sample times and values");
+    };
+    wave::DataStore uniform(10, 2, {{"A", "V"}});
+    std::vector<float> samples(20);
+    for (std::size_t i = 0; i < samples.size(); ++i) samples[i] = static_cast<float>(i);
+    uniform.append(0, samples);
+    expect_times(uniform.query(0, .35, .65, 100), {.4, .5, .6});
+    expect_times(uniform.query(0, .35, .65, 100, 0, true), {.3, .4, .5, .6, .7});
+    require(uniform.query(0, .35, .36, 100).empty(), "Exact query must keep its existing interval contract");
+    expect_times(uniform.query(0, .35, .36, 100, 0, true), {.3, .4});
+    expect_times(uniform.query(0, .35, .36, 100, 4, true), {.4});
+    require(uniform.query(0, .35, .36, 100, 5, true).empty(), "Neighbor query must respect the clear cutoff");
+    for (auto width : {1u, 1000u}) {
+        const auto points = uniform.query(0, .25, 1.55, width, 0, true);
+        require(std::abs(points.front().t - .2) < 1e-12 && std::abs(points.back().t - 1.6) < 1e-12,
+                "Raw and reduced queries must preserve both outside neighbors");
+    }
+    require(uniform.query(0, -2, -1, 100, 0, true).empty() &&
+            uniform.query(0, 2, 3, 100, 0, true).empty(), "Neighbors must stay within retained history");
+    const auto frozen = uniform.snapshot(0, 2);
+    uniform.clear_channel(0);
+    require(uniform.query(0, .35, .36, 100, 0, true).empty(), "Neighbors must not resurrect cleared samples");
+    require(frozen.query(0, .35, .36, 100, uniform.channel_first_frame(0), true).empty(),
+            "Live clear cutoff must also filter frozen neighbors");
+    uniform.set_capacity_frames(8);
+    expect_times(frozen.query(0, .35, .36, 100, 0, true), {.3, .4});
+
+    wave::DataStore gaps(1, 32, {{"A", "V"}});
+    gaps.append(0, std::vector<float>{0});
+    gaps.append(20, std::vector<float>{20});
+    for (auto width : {1u, 1000u})
+        expect_times(gaps.query(0, 5.2, 6.8, width, 0, true), {0, 20});
+    expect_times(gaps.query(0, 5.2, 6.8, 100, 1, true), {20});
+
+    wave::DataStore timed(1, 8, {});
+    timed.configure(0, {{"A", "V"}}, true);
+    const std::vector<double> times{0, .37, 1.2, 1.5};
+    for (std::size_t i = 0; i < times.size(); ++i) {
+        const float value = static_cast<float>(i);
+        timed.append_received(i, std::span<const float>(&value, 1), times[i]);
+    }
+    require(timed.query(0, .4, .5, 100).empty(), "Exact irregular query must stay empty between samples");
+    expect_times(timed.query(0, .4, .5, 100, 0, true), {.37, 1.2});
+    expect_times(timed.query(0, .37, 1.2, 100, 0, true), times);
+    expect_times(timed.snapshot(0, 2).query(0, .4, .5, 100, 0, true), {.37, 1.2});
+
+    timed.clear();
+    timed.set_capacity_frames(256);
+    std::uint64_t frame = 0;
+    const auto receive = [&](double t, float value) {
+        timed.append_received(frame++, std::span<const float>(&value, 1), t);
+    };
+    receive(0, 0);
+    receive(.25, 0);
+    receive(.6, 0);
+    for (int i = 0; i < 100; ++i)
+        receive(1.0 + i * 1e-5, i == 20 ? 4.0f : i == 30 ? -5.0f : 0.0f);
+    receive(1.45, 0);
+    receive(1.7, 0);
+    const auto reduced = timed.query(0, .2, 1.5, 16, 0, true);
+    expect_times(reduced, {0, .25, .6, 1.0, 1.0002, 1.0003, 1.00099, 1.45, 1.7});
+    require(reduced[4].value == 4 && reduced[5].value == -5,
+            "Reducing a burst must keep both extrema together with isolated readings and outside neighbors");
+    std::cout << "PASS viewport neighbors: raw, reduced, gaps, cutoffs, frozen and receiver timestamps\n";
+}
 } // namespace
 
 int main() {
     try {
+        connected_view_queries();
         {
             wave::DataStore gaps(1000, .128, {{"A", "V"}});
             gaps.append(0, std::vector<float>(40, 2));

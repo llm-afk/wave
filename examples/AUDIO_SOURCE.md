@@ -4,11 +4,12 @@
 2. Open `run.cmd` (Wave only).
 3. Open `run-audio-source.cmd` (audio source only).
 4. Play music, a video or another sound on the default Windows playback device.
-5. In Wave's context menu, manually select Audio Left / Audio Right (or numbered
-   Audio channels for other formats). Registration never selects channels.
+5. Registered Audio Left / Audio Right (or numbered channels for other formats)
+   display automatically. For useful audio detail, the embedding host should use
+   a short time span (e.g. 0.01 seconds) and fixed Y limits of -1 to 1.
 
 The audio source and `run-source.cmd` can run together against the same Wave.
-CPU usage, Memory usage and Audio signals appear in one flat selection menu.
+CPU usage, Memory usage and Audio signals appear in the same plot and legend.
 Each source retains its own sample rate and buffer; start order is free.
 Closing either process does not close the other. Ctrl+C or closing the source
 console ends capture. Device removal/format errors stop the source with an error;
@@ -31,16 +32,19 @@ Wave data store retains history within timeline capacity and connects real sampl
 missing audio. Reconnect discards pending old samples and resumes from Wave's
 acknowledged index. This is live visualization, not a lossless audio recorder.
 
-Wave's initial buffer holds 100,000 points/channel: about 2.08 seconds at 48 kHz.
-To change history, set **设置 → 缓冲区点数** to
-`sample_rate * desired_seconds`. Then zoom the X axis inward to see
-the oscillations. Empty windows retain their axes until a channel is selected.
+Wave's default buffer holds 50,000 frames per channel, about 1.04 seconds at 48 kHz.
+The initial audio view fills that interval from the left, then scrolls with the newest
+sample at the right. Auto Y targets 80% of the plot height for the visible amplitude
+range. Wheel over an axis to zoom it independently. The host can specify a shorter
+time span, fixed Y limits or another buffer capacity through the component APIs.
 
-Wave automatically smooths the live time axis for regularly batched data. It
+When the cache has room beyond the displayed time span, Wave can smooth the live
+time axis for regularly batched data. It
 learns the arrival cadence and keeps roughly two batches of display headroom
 (typically 80–100 ms at 25 packets/second), then advances on each rendered frame.
-The protocol, timestamps and sample values are unchanged. All live windows use
-the same display clock; freezing still holds the view while reception continues.
+The protocol, timestamps and sample values are unchanged. Views reading the same
+source share its display clock. Double click pauses only the view and resumes
+at the latest cache; stored timestamps and samples remain unchanged.
 When input stops, the display drains to the last real sample and stops there.
 Very short user-selected histories cannot retain this headroom, so Wave falls
 back to displaying the available data without delaying it. Slow telemetry and

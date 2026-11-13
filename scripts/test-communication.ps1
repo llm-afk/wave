@@ -30,9 +30,9 @@ try {
     if ($viewer.HasExited) { throw 'Wave exited on port conflict' }
     $blocker.Stop(); $blocker = $null
     $report = Read-Report $viewer
-    if ($report.tcp_frames -lt 5 -or $report.max_submitted_plot_points -ne 0) { throw 'Expected reception without automatically selecting any channel' }
+    if ($report.tcp_frames -lt 5 -or $report.max_submitted_plot_points -le 0) { throw 'Expected received data to display automatically' }
     if ($source.HasExited) { throw 'Source exited with Wave' }
-    Write-Host 'PASS source-first startup, port-conflict recovery and reception without auto-selection.'
+    Write-Host 'PASS source-first startup, port-conflict recovery and automatic live display.'
     $viewer = Start-Viewer
     $report = Read-Report $viewer
     if ($report.tcp_frames -lt 5 -or $source.HasExited) { throw 'Source did not reconnect after Wave restarted' }
