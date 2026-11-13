@@ -309,7 +309,7 @@ void fast_audio_narrow_view_has_stable_layout() {
 
 
 // The AA stroke uses the line atlas, while marker faces and fringes use its white texel.
-constexpr int trace_alpha8 = 153; // 60% opacity in the rendered vertex colors.
+constexpr int trace_alpha8 = 179; // 70% opacity in the rendered vertex colors.
 constexpr int full_marker_alpha8 = 242; // 95% opacity in the rendered vertex colors.
 int rendered_alpha(ImRect area, ImU32 color, bool markers) {
     int alpha = 0;
@@ -339,7 +339,7 @@ void sample_markers_follow_horizontal_zoom() {
             f.frame();
         }
     };
-    require(alpha(false) == trace_alpha8 && alpha(true) == 0, "Dense data must show the 60 percent stroke without markers");
+    require(alpha(false) == trace_alpha8 && alpha(true) == 0, "A resolved line with dense samples must retain the base stroke without markers");
     f.view->set_paused(true);
     set_spacing(2.1);
     require(alpha(true) > 0 && alpha(true) < 25, "Markers must remain faintly visible at one diameter of spacing");

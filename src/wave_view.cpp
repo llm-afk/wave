@@ -22,7 +22,7 @@ constexpr std::array<ImVec4, 8> signal_colors = {{
     {0.80f, 0.40f, 1.00f, 1}, {0.267f, 0.90f, 1.00f, 1},
     {1.00f, 0.60f, 0.267f, 1}, {0.77f, 0.81f, 0.86f, 1}
 }};
-constexpr float line_alpha = 0.60f;
+constexpr float line_alpha = 0.70f;
 constexpr float stroke_width_dip = 1.25f;
 constexpr float full_marker_alpha = 0.95f;
 constexpr double hidden_spacing_diameters = 0.75;
