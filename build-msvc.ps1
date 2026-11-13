@@ -154,7 +154,7 @@ try {
             (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
             (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
         )
-        Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'ws2_32.lib')
+        Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'ws2_32.lib', 'advapi32.lib')
         Link-MsvcExecutable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
         Link-MsvcExecutable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
     }
@@ -180,7 +180,7 @@ try {
 
         $viewTestObjects = $viewObjects + @((Build-MsvcObject 'tests/view_tests.cpp'))
         $viewTestExecutable = Join-Path $buildDirectory 'view_tests.exe'
-        Link-MsvcExecutable $viewTestExecutable $viewTestObjects @('/SUBSYSTEM:CONSOLE', 'user32.lib', 'imm32.lib', 'shell32.lib')
+        Link-MsvcExecutable $viewTestExecutable $viewTestObjects @('/SUBSYSTEM:CONSOLE', 'user32.lib', 'imm32.lib', 'shell32.lib', 'advapi32.lib')
         Write-Host 'Running headless view tests...'
         & $viewTestExecutable | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "View tests failed (exit $LASTEXITCODE)." }

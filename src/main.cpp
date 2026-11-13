@@ -31,6 +31,7 @@ UINT resize_width{}, resize_height{};
 constexpr UINT_PTR move_size_timer = 1;
 bool moving_or_sizing = false;
 wave::win32::TouchpadInput touchpad;
+wave::win32::WheelInput wheel;
 std::function<void()> render_frame;
 
 bool make_render_target() {
@@ -93,6 +94,7 @@ bool create_device(HWND window) {
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 LRESULT WINAPI window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (touchpad.handle(message, wparam)) return 0;
+    if (ImGui::GetCurrentContext() && wheel.handle(message, wparam, lparam)) return 0;
     if (ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam)) return 1;
     switch (message) {
     case WM_ENTERSIZEMOVE:
@@ -171,6 +173,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(device, device_context);
     touchpad.enable(window);
+    wheel.enable(window);
 
     wave::SignalHub data;
     wave::WaveView view(data);

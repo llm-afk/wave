@@ -64,7 +64,7 @@
 | 子窗标题、浮窗边框、公共分隔线 | 左拖 | 标题移动，边框调整浮窗大小，公共分隔线改变相邻两窗比例。单窗模式省去拖动标题条 |
 | 图例、已打开的菜单、画板外 | 点击、滚轮 | 图例仅显示通道。菜单处理自身输入。画板外由宿主处理，宿主的按钮和滚动区正常响应 |
 
-宿主能识别双指手势时，将本帧两指中心的位移转换为逻辑像素，调用 `view.draw(wave::TouchpadDelta{right, up})`。向右、向上分别取正，松手后传零。已转交的手势由 Wave 消费一次。普通鼠标事件继续走 ImGui。独立演示程序在系统支持时读取精密触摸板的触点坐标。仅提供滚动事件的设备按驱动上报的两个分量缩放，整格、分数以及分帧上报的滚动使用同一方向映射。[Windows 精密触摸板输入](https://learn.microsoft.com/en-us/windows/win32/input-precisiontouchpad/getpointertouchpadinfo)
+宿主能识别双指手势时，将本帧两指中心的位移转换为逻辑像素，调用 `view.draw(wave::TouchpadDelta{right, up})`。向右、向上分别取正，松手后传零。已转交的手势由 Wave 消费一次。普通鼠标事件继续走 ImGui。独立演示程序优先读取精密触摸板的触点坐标。对于带触摸板标记的滚动，或这类远程桌面转发的无设备句柄滚动，演示程序按接收端的 Windows 触摸板滚动设置换算方向。连接只上报一轴时仅缩放该轴。[Windows 触摸板设置](https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/touchpad-tuning-guidelines) · [Windows 原始输入设备句柄](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawinputheader)
 
 按下时记录命中区域和所属面板。输入坐标统一用画板本地逻辑像素，适配器处理一次缩放换算。拖出区域仍由原手势接收移动与松开。弹窗优先于下层面板，重叠浮窗优先命中最上层。失焦、失去捕获或关闭面板时取消手势和吸附预览。`input()` 回复是否消费事件、获取或释放鼠标捕获、是否需要重绘。ImGui 适配器沿用宿主现有的输入投递链，画板在该上下文中处理局部命中，避免一次滚轮同时缩放波形和滚动宿主页面。[Dear ImGui 输入路由说明](https://github.com/ocornut/imgui/blob/master/docs/FAQ.md)
 

@@ -833,6 +833,57 @@ void two_finger_zoom() {
 }
 
 #ifdef _WIN32
+void win32_forwarded_touchpad_scroll() {
+    Fixture f;
+    f.view->set_paused(true);
+    f.frame();
+    const auto before = f.state();
+    f.move(before.rect.GetCenter());
+    wave::win32::WheelInput wheel;
+    const auto post = [&](UINT msg, int delta, DWORD time, INPUT_MESSAGE_DEVICE_TYPE source, bool reversed = false) {
+        return wheel.post_touchpad_wheel(msg, MAKEWPARAM(0, static_cast<WORD>(delta)), time, source, reversed);
+    };
+    // Actual remote capture: no raw device handle, IMDT_MOUSE, negative X for
+    // fingers moving right and negative Y for fingers moving up.
+    wheel.observe_mouse(RI_MOUSE_HWHEEL, nullptr, 100);
+    require(post(WM_MOUSEHWHEEL, -165, 100, IMDT_MOUSE), "Forwarded horizontal scroll must be consumed");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 116);
+    require(post(WM_MOUSEWHEEL, -272, 132, IMDT_MOUSE), "Coalesced vertical scroll must be consumed");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 132); // Late raw packet from the same coalesced scroll.
+    f.frame();
+    const auto detail = f.state();
+    require(near(detail.x.Size() / before.x.Size(), std::exp(-165.0 / WHEEL_DELTA * 35 / 180)) &&
+            near(detail.y.Size() / before.y.Size(), std::exp(-272.0 / WHEEL_DELTA * 35 / 180)),
+        "Forwarded right/up must narrow both ranges once, by independent amounts");
+    wheel.observe_mouse(RI_MOUSE_HWHEEL, nullptr, 200);
+    require(post(WM_MOUSEHWHEEL, 165, 200, IMDT_MOUSE), "Forwarded left scroll must be consumed");
+    f.frame();
+    require(near(f.state().x.Size(), before.x.Size()) && near(f.state().y.Size(), detail.y.Size()),
+        "A forwarded axis-locked gesture must affect only the component actually received");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 216);
+    require(post(WM_MOUSEWHEEL, 272, 216, IMDT_MOUSE), "Forwarded down scroll must be consumed");
+    f.frame();
+    require(near(f.state().x.Size(), before.x.Size()) && near(f.state().y.Size(), before.y.Size()),
+        "Left/down forwarded in separate frames must restore both spans");
+
+    require(post(WM_MOUSEWHEEL, WHEEL_DELTA, 300, IMDT_TOUCHPAD, true),
+        "Explicit touchpad scroll must also honor the opposite Windows scrolling preference");
+    f.frame();
+    require(f.state().y.Size() < before.y.Size(), "Up with reversed Windows scrolling must still show detail");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 400);
+    require(!post(WM_MOUSEHWHEEL, -30, 400, IMDT_MOUSE) && !post(WM_MOUSEWHEEL, -30, 600, IMDT_MOUSE),
+        "An old or different-axis raw packet must not reverse a mouse wheel");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 700);
+    wheel.observe_mouse(RI_MOUSE_WHEEL, reinterpret_cast<HANDLE>(1), 700);
+    require(!post(WM_MOUSEWHEEL, 7, 700, IMDT_MOUSE), "A physical high-resolution wheel keeps its direction");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 800);
+    wheel.handle(WM_KILLFOCUS, 0, 0);
+    require(!post(WM_MOUSEWHEEL, 30, 800, IMDT_MOUSE), "Focus loss must clear raw wheel sources");
+    wheel.observe_mouse(RI_MOUSE_WHEEL, nullptr, 900);
+    require(!post(WM_MOUSEWHEEL, 30, 900, IMDT_UNAVAILABLE), "Sent wheel messages retain backend routing");
+    std::cout << "PASS remote touchpad scroll direction, coalescing, axis lock and physical wheel routing\n";
+}
+
 void win32_touchpad_contacts_drive_the_view() {
     Fixture f;
     f.view->set_paused(true);
@@ -1241,6 +1292,7 @@ int main() {
         wheel_zoom_across_panel();
         two_finger_zoom();
 #ifdef _WIN32
+        win32_forwarded_touchpad_scroll();
         win32_touchpad_contacts_drive_the_view();
 #endif
         right_drag_matches_two_fingers_across_panel();
