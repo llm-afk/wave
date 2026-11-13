@@ -1,3 +1,10 @@
+#ifdef _WIN32
+#ifndef WINVER
+#define WINVER 0x0603
+#endif
+#include "win32_touchpad.hpp"
+#undef near // Win32's legacy memory-model macro conflicts with the numerical comparison below.
+#endif
 #include "wave_view.hpp"
 #include "plot_navigation.hpp"
 #include "signal_hub.hpp"
@@ -69,7 +76,9 @@ public:
         }
         data.append(first, values);
     }
-    void frame() {
+    void frame(wave::TouchpadDelta fingers) { render(fingers); }
+    void frame() { render(std::nullopt); }
+    void render(std::optional<wave::TouchpadDelta> fingers) {
         ImGui::GetIO().DeltaTime = frame_delta;
         ImGui::NewFrame();
         if (standalone_canvas) {
@@ -79,7 +88,7 @@ public:
             ImGui::Begin("Canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            view->draw();
+            if (fingers) view->draw(*fingers); else view->draw();
             ImGui::End();
             ImGui::PopStyleVar();
         } else {
@@ -91,12 +100,12 @@ public:
         if (ImGui::Button("Host control")) ++host_clicks;
         button = {ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};
         ImGui::BeginChild("left", {second ? 470.0f : 0.0f, scrollable_host ? 300.0f : 0.0f});
-        view->draw();
+        if (fingers) view->draw(*fingers); else view->draw();
         ImGui::EndChild();
         if (second) {
             ImGui::SameLine();
             ImGui::BeginChild("right", {0, 0});
-            second->draw();
+            if (fingers) second->draw(*fingers); else second->draw();
             ImGui::EndChild();
         }
         if (scrollable_host) ImGui::Dummy({1600, 1000});
@@ -153,15 +162,15 @@ bool finite(wave::AxisRange range) {
 void direction_and_anchor() {
     const wave::PlotRange initial{{-2, 8}, {-10, 10}};
     const wave::ZoomAnchor anchor{1, 4};
-    const auto zoomed = wave::zoom_from_drag(initial, anchor, -150, 90);
+    const auto zoomed = wave::zoom_from_drag(initial, anchor, 150, -90);
     require(span(zoomed.x) < span(initial.x) && span(zoomed.y) < span(initial.y),
-            "Left/down dragging must zoom into X/Y");
+            "Right/up dragging must zoom into X/Y");
     require(near(fraction(initial.x, anchor.x), fraction(zoomed.x, anchor.x)) &&
             near(fraction(initial.y, anchor.y), fraction(zoomed.y, anchor.y)),
             "The pressed data anchor must keep its viewport position");
-    const auto expanded = wave::zoom_from_drag(initial, anchor, 150, -90);
+    const auto expanded = wave::zoom_from_drag(initial, anchor, -150, 90);
     require(span(expanded.x) > span(initial.x) && span(expanded.y) > span(initial.y),
-            "Right/up dragging must zoom out of X/Y");
+            "Left/down dragging must zoom out of X/Y");
     require(near(span(zoomed.x) * span(expanded.x), span(initial.x) * span(initial.x)),
             "Opposite drag distances must produce reciprocal exponential scales");
 }
@@ -189,9 +198,9 @@ void extreme_deltas_and_limits() {
     wave::DragZoomLimits limits;
     limits.max_x_span = 120;
     limits.max_y_span = 500;
-    const auto zoomed = wave::zoom_from_drag(initial, anchor, -1e308, 1e308,
+    const auto zoomed = wave::zoom_from_drag(initial, anchor, 1e308, -1e308,
                                             wave::ZoomAxes::Both, limits);
-    const auto expanded = wave::zoom_from_drag(initial, anchor, 1e308, -1e308,
+    const auto expanded = wave::zoom_from_drag(initial, anchor, -1e308, 1e308,
                                               wave::ZoomAxes::Both, limits);
     require(finite(zoomed.x) && finite(zoomed.y) && finite(expanded.x) && finite(expanded.y),
             "Extreme mouse deltas must always produce finite, ordered bounds");
@@ -216,14 +225,14 @@ void extreme_deltas_and_limits() {
 void zoom_has_no_minimum_scale() {
     const wave::PlotRange initial{{54, 56}, {-.01, .03}};
     const wave::ZoomAnchor anchor{55.2, .007};
-    const auto small = wave::zoom_from_drag(initial, anchor, -3000, 3000);
-    const auto smaller = wave::zoom_from_drag(small, anchor, -100, 100);
+    const auto small = wave::zoom_from_drag(initial, anchor, 3000, -3000);
+    const auto smaller = wave::zoom_from_drag(small, anchor, 100, -100);
     require(finite(small.x) && finite(small.y) && span(small.x) < 1.0 / 20'000 && span(small.y) < 1e-6,
             "X must zoom below one sample interval and Y below its former fixed minimum");
     require(span(smaller.x) < span(small.x) && span(smaller.y) < span(small.y),
             "Zoom must continue shrinking below both former minimum scales");
     const wave::PlotRange tiny{{0, 1e-200}, {0, 1e-200}};
-    const auto tinier = wave::zoom_from_drag(tiny, {0, 0}, -180, 180);
+    const auto tinier = wave::zoom_from_drag(tiny, {0, 0}, 180, -180);
     require(finite(tinier.x) && finite(tinier.y) && span(tinier.x) < span(tiny.x) && span(tinier.y) < span(tiny.y),
             "Valid tiny coordinate ranges must not be inflated to a fixed numerical floor");
 }
@@ -727,7 +736,7 @@ void wheel_zoom_regions() {
     std::cout << "PASS X/Y/XY wheel regions, anchors, persistent ranges and live following\n";
 }
 
-void horizontal_scroll_zooms_time() {
+void two_finger_zoom() {
     Fixture f;
     const auto wheel = [&](float x, float y) {
         ImGui::GetIO().AddMouseWheelEvent(x, y);
@@ -735,30 +744,56 @@ void horizontal_scroll_zooms_time() {
     };
     auto before = f.state();
     f.move(before.rect.GetCenter());
-    wheel(-.25f, .05f);
+    wheel(-.25f, .125f);
     auto after = f.state();
-    require(near(after.x.Size(), before.x.Size() * std::exp(.25 * 35 / 180)) &&
-            near(after.x.Max, before.x.Max) && after.y.Min == before.y.Min && after.y.Max == before.y.Max,
-        "Fractional scroll-right over the trace must expand only the time span and keep the live edge");
-    wheel(0, .05f);
-    require(near(f.state().x.Min, after.x.Min) && f.state().y.Size() == before.y.Size(),
-        "A separate vertical tail from the horizontal gesture must not zoom Y");
+    require(near(after.x.Size(), before.x.Size() * std::exp(-.25 * 35 / 180)) &&
+            near(after.y.Size(), before.y.Size() * std::exp(-.125 * 35 / 180)) && near(after.x.Max, before.x.Max),
+        "Upper-right wheel fallback must magnify both axes by their own component while following live data");
+    wheel(.25f, 0);
+    wheel(0, -.125f);
+    require(near(f.state().x.Size(), before.x.Size()) && near(f.state().y.Min, before.y.Min) && near(f.state().y.Max, before.y.Max),
+        "Lower-left fractions on separate frames must undo the diagonal");
+    f.frame({12, 8});
+    after = f.state();
+    require(after.x.Size() < before.x.Size() && after.y.Size() < before.y.Size(),
+        "The host's physical upper-right two-finger gesture must magnify both axes");
     f.append(20'000, 20'000);
     f.frame();
     require(f.state().x.Max > before.x.Max && near(f.state().x.Size(), after.x.Size()),
-        "New data must keep scrolling at the horizontally selected time scale");
+        "New data must keep scrolling at the selected time scale");
     f.view->set_paused(true);
     f.frame();
+    before = f.state();
+    const auto anchor_pos = ImVec2{before.rect.Min.x + before.rect.GetWidth() * .3f,
+                                   before.rect.Min.y + before.rect.GetHeight() * .7f};
+    f.move(anchor_pos);
+    const double fx = (ImGui::GetIO().MousePos.x - before.rect.Min.x) / before.rect.GetWidth();
+    const double fy = (before.rect.Max.y - ImGui::GetIO().MousePos.y) / before.rect.GetHeight();
+    f.frame({-18, -9});
+    after = f.state();
+    require(after.x.Size() > before.x.Size() && after.y.Size() > before.y.Size() && f.view->paused() &&
+            near(before.x.Min + fx * before.x.Size(), after.x.Min + fx * after.x.Size()) &&
+            near(before.y.Min + fy * before.y.Size(), after.y.Min + fy * after.y.Size()),
+        "Lower-left must show more history and amplitude around the paused cursor");
+    f.frame({18, 9});
+    require(near(f.state().x.Min, before.x.Min) && near(f.state().y.Min, before.y.Min) &&
+            near(f.state().x.Max, before.x.Max) && near(f.state().y.Max, before.y.Max),
+        "Reversing the physical slide must recover both axes");
+    before = f.state();
+    ImGui::GetIO().AddMouseWheelEvent(0, .25f);
+    f.frame({});
+    require(f.state().x.Size() > before.x.Size() && f.state().y.Size() > before.y.Size(),
+        "A host that separates physical gestures must retain the mouse mapping even for a fractional vertical notch");
     before = f.state();
     f.move({before.rect.Min.x + before.rect.GetWidth() * .28f, before.rect.Max.y + 5});
     const double fraction = (ImGui::GetIO().MousePos.x - before.rect.Min.x) / before.rect.GetWidth();
     const double cursor_time = before.x.Min + fraction * before.x.Size();
-    wheel(.5f, 0);
+    f.frame({18, -9});
     after = f.state();
     require(after.x.Size() < before.x.Size() && near(after.x.Min + fraction * after.x.Size(), cursor_time) &&
             after.y.Min == before.y.Min && after.y.Max == before.y.Max && f.view->paused(),
-        "Scroll-left over the time axis must magnify paused time around the cursor");
-    wheel(-.5f, 0);
+        "Only the horizontal component may zoom the bottom time axis");
+    f.frame({-18, 9});
     require(near(f.state().x.Min, before.x.Min) && near(f.state().x.Max, before.x.Max),
         "Opposite fractional scroll must recover the paused range");
     const auto unchanged_x = [&] {
@@ -766,22 +801,24 @@ void horizontal_scroll_zooms_time() {
             "Horizontal input must be local to an enabled plot or time axis");
     };
     f.move({before.rect.Min.x - 4, before.rect.GetCenter().y});
-    wheel(-1, 0);
+    f.frame({12, 8});
     unchanged_x();
+    require(f.state().y.Size() < before.y.Size(), "The left scale must respond only to the vertical component");
+    const auto axis_y = f.state().y;
     f.move(GImPlot->Plots.TryGetMapData(0)->Items.Legend.RectClamped.GetCenter());
-    wheel(-1, 0);
+    f.frame({12, 8});
     unchanged_x();
     f.view->set_zoom_enabled(false);
     f.move(before.rect.GetCenter());
-    wheel(-1, 0);
+    f.frame({12, 8});
     unchanged_x();
+    require(near(f.state().y.Size(), axis_y.Size()), "Legend and disabled zoom must also ignore the vertical component");
     f.view->set_zoom_enabled(true);
     f.view->set_paused(false);
     f.view->set_auto_y(true);
     f.frame();
     f.move(f.state().rect.GetCenter());
-    wheel(-.25f, .08f);
-    wheel(0, -.05f);
+    f.frame({12, 0});
     f.append(40'000, 20'000, 30);
     f.frame();
     require(f.state().y.Max > 29, "Two-finger horizontal zoom must leave automatic Y fitting active");
@@ -792,14 +829,73 @@ void horizontal_scroll_zooms_time() {
     wheel(0, 1);
     require(f.state().y.Size() > before_notch.y.Size() && f.state().x.Size() > before_notch.x.Size(),
         "A normal vertical wheel notch after a horizontal swipe must still zoom both axes over the trace");
-    wheel(-.25f, 0);
-    for (int i = 0; i < 12; ++i) f.frame();
     const auto before_vertical = f.state();
     wheel(0, .25f);
-    require(f.state().y.Size() > before_vertical.y.Size(),
-        "Independent fractional vertical input must be accepted once the horizontal swipe has ended");
-    std::cout << "PASS horizontal touchpad zoom, fractional input, paused cursor anchor, input scope and automatic Y\n";
+    require(f.state().y.Size() < before_vertical.y.Size() && near(f.state().x.Size(), before_vertical.x.Size()),
+        "A directional vertical fraction must zoom Y alone");
+    f.frame({-8, 8});
+    require(f.state().x.Size() > before_vertical.x.Size() && f.state().y.Size() < before_vertical.y.Size(),
+        "Upper-left must widen X while narrowing Y");
+    std::cout << "PASS two-finger directional XY zoom, wheel fallback, hit regions and pause/live anchors\n";
 }
+
+#ifdef _WIN32
+void win32_touchpad_contacts_drive_the_view() {
+    Fixture f;
+    f.view->set_paused(true);
+    f.frame();
+    const auto before = f.state();
+    f.move(before.rect.GetCenter());
+    wave::win32::TouchpadInput input;
+    POINTER_TOUCH_INFO contacts[3]{};
+    for (UINT32 i = 0; i < 3; ++i) {
+        auto& p = contacts[i].pointerInfo;
+        p.pointerId = i + 1;
+        p.pointerType = PT_TOUCHPAD;
+        p.pointerFlags = POINTER_FLAG_INCONTACT;
+        p.ptHimetricLocation = {2000 + static_cast<LONG>(i) * 1000, 3000};
+    }
+    input.update(contacts, 2);
+    for (int i = 0; i < 2; ++i) {
+        contacts[i].pointerInfo.ptHimetricLocation.x += 254;
+        contacts[i].pointerInfo.ptHimetricLocation.y -= 127;
+    }
+    std::swap(contacts[0], contacts[1]);
+    input.update(contacts, 2);
+    input.update(contacts, 2); // The same frame can be reported for both IDs.
+    auto delta = input.take_delta();
+    require(near(delta.right, 9.6) && near(delta.up, 4.8), "Contact motion must give right/up logical pixels exactly once");
+    f.frame(delta);
+    const auto after = f.state();
+    require(after.x.Size() < before.x.Size() && after.y.Size() < before.y.Size(), "Physical upper-right must show detail");
+    for (int i = 0; i < 2; ++i) {
+        contacts[i].pointerInfo.ptHimetricLocation.x -= 254;
+        contacts[i].pointerInfo.ptHimetricLocation.y += 127;
+    }
+    input.update(contacts, 2);
+    f.frame(input.take_delta());
+    require(near(f.state().x.Size(), before.x.Size()) && near(f.state().y.Size(), before.y.Size()),
+        "Physical lower-left of the same length must restore the overview");
+    contacts[0].pointerInfo.ptHimetricLocation.x += 150;
+    contacts[1].pointerInfo.ptHimetricLocation.x -= 150;
+    input.update(contacts, 2);
+    input.update(contacts, 3);
+    contacts[0].pointerInfo.ptHimetricLocation.x += 2000;
+    input.update(contacts, 2);
+    contacts[1].pointerInfo.pointerId = 4;
+    contacts[1].pointerInfo.ptHimetricLocation.y += 800;
+    input.update(contacts, 2);
+    delta = input.take_delta();
+    require(delta.right == 0 && delta.up == 0, "A centered pinch, third finger or replacement contact must not produce a pan");
+    contacts[0].pointerInfo.ptHimetricLocation.y += 100;
+    input.update(contacts, 2);
+    input.handle(WM_KILLFOCUS, 0);
+    input.update(contacts, 2);
+    delta = input.take_delta();
+    require(delta.right == 0 && delta.up == 0, "Focus loss must discard pending motion and rebaseline the contact pair");
+    std::cout << "PASS Win32 physical touchpad contacts, reversibility, deduplication and cancellation\n";
+}
+#endif
 
 void right_drag_zoom_regions() {
     for (int axis = 0; axis < 3; ++axis) {
@@ -814,9 +910,9 @@ void right_drag_zoom_regions() {
         // Starting on axis labels locks the axis even after entering the plot.
         f.move({point.x + 60, point.y - 45});
         const auto after = f.state();
-        require((axis == 2 ? near(after.x.Size(), before.x.Size()) : after.x.Size() > before.x.Size()) &&
-                (axis == 1 ? near(after.y.Size(), before.y.Size()) : after.y.Size() > before.y.Size()),
-            "Right/up dragging must zoom out on the axes chosen at press time");
+        require((axis == 2 ? near(after.x.Size(), before.x.Size()) : after.x.Size() < before.x.Size()) &&
+                (axis == 1 ? near(after.y.Size(), before.y.Size()) : after.y.Size() < before.y.Size()),
+            "Right/up dragging must zoom in on the axes chosen at press time");
         require(near(after.x.Max, before.x.Max), "A held right drag must keep following the latest data");
         f.append(20'000, 20'000);
         f.frame();
@@ -827,9 +923,17 @@ void right_drag_zoom_regions() {
                 near(f.state().y.Min, before.y.Min) && near(f.state().y.Max, before.y.Max),
             "Returning a drag to its start must restore the original scales");
         f.move({point.x - 50, point.y + 35});
-        require((axis == 2 ? near(f.state().x.Size(), before.x.Size()) : f.state().x.Size() < before.x.Size()) &&
-                (axis == 1 ? near(f.state().y.Size(), before.y.Size()) : f.state().y.Size() < before.y.Size()),
-            "Left/down dragging must zoom in on the captured axes");
+        require((axis == 2 ? near(f.state().x.Size(), before.x.Size()) : f.state().x.Size() > before.x.Size()) &&
+                (axis == 1 ? near(f.state().y.Size(), before.y.Size()) : f.state().y.Size() > before.y.Size()),
+            "Left/down dragging must zoom out on the captured axes");
+        if (axis == 0) {
+            f.move({point.x + 60, point.y});
+            require(f.state().x.Size() < before.x.Size() && near(f.state().y.Size(), before.y.Size()),
+                "A horizontal right drag must only magnify X");
+            f.move({point.x, point.y - 45});
+            require(near(f.state().x.Size(), before.x.Size()) && f.state().y.Size() < before.y.Size(),
+                "A vertical right drag must only magnify Y");
+        }
         f.mouse(ImGuiMouseButton_Right, false);
         require(GImGui->OpenPopupStack.empty(), "Right release must not open menus");
     }
@@ -1137,7 +1241,10 @@ int main() {
         extreme_deltas_and_limits();
         zoom_has_no_minimum_scale();
         wheel_zoom_regions();
-        horizontal_scroll_zooms_time();
+        two_finger_zoom();
+#ifdef _WIN32
+        win32_touchpad_contacts_drive_the_view();
+#endif
         right_drag_zoom_regions();
         unsupported_inputs_and_host_override();
         wheel_does_not_scroll_the_host();

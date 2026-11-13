@@ -1,7 +1,11 @@
 // Window/DirectX setup adapted from Dear ImGui's MIT-licensed Win32/DX11 example.
+#ifndef WINVER
+#define WINVER 0x0603 // Expose Win32 pointer types in the bundled MinGW headers.
+#endif
 #include "tcp_source.hpp"
 #include "data_core.hpp"
 #include "wave_view.hpp"
+#include "win32_touchpad.hpp"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -26,6 +30,7 @@ ID3D11RenderTargetView* render_target{};
 UINT resize_width{}, resize_height{};
 constexpr UINT_PTR move_size_timer = 1;
 bool moving_or_sizing = false;
+wave::win32::TouchpadInput touchpad;
 std::function<void()> render_frame;
 
 bool make_render_target() {
@@ -87,6 +92,7 @@ bool create_device(HWND window) {
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 LRESULT WINAPI window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (touchpad.handle(message, wparam)) return 0;
     if (ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam)) return 1;
     switch (message) {
     case WM_ENTERSIZEMOVE:
@@ -164,6 +170,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     wave::apply_style(current_dpi_scale);
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(device, device_context);
+    const bool native_touchpad = touchpad.enable(window);
 
     wave::SignalHub data;
     wave::WaveView view(data);
@@ -183,6 +190,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     std::wstring previous_title;
     render_frame = [&] {
         if (rendering || done || render_failed) return;
+        const auto fingers = touchpad.take_delta();
         struct FrameGuard {
             bool& active;
             explicit FrameGuard(bool& value) : active(value) { active = true; }
@@ -228,7 +236,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         if (ImGui::Begin("Wave", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-            view.draw();
+            if (native_touchpad) view.draw(fingers);
+            else view.draw();
         }
         ImGui::End();
         ImGui::PopStyleVar();

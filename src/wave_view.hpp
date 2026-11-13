@@ -18,6 +18,10 @@ struct ViewOptions {
     bool pause_on_double_click = true;
 };
 
+// Two-finger translation since the previous frame, in logical pixels.
+// Positive components mean physical finger motion right and up, respectively.
+struct TouchpadDelta { float right = 0, up = 0; };
+
 // One live plot in the current ImGui window/child's available area.
 // The time axis follows live data. Pause affects only this view; the data store
 // keeps receiving, and resuming jumps straight to the latest cached data.
@@ -32,6 +36,10 @@ public:
     WaveView& operator=(const WaveView&) = delete;
 
     void draw();
+    // Hosts that distinguish fingers from wheels use this overload every frame,
+    // passing zero when idle, so high-resolution mouse wheels retain their mapping.
+    // Consume its native event so it is not also delivered as mouse-wheel input.
+    void draw(TouchpadDelta fingers);
     void set_time_span(double seconds);
     void set_y_range(double minimum, double maximum);
     void set_auto_y(bool enabled);

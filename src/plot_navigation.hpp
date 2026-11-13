@@ -84,7 +84,7 @@ inline AxisRange zoom_axis(AxisRange initial, double anchor, double log_scale,
 
 // initial and anchor are captured once when the right button goes down.
 // Pass total displacement from that same press on every frame; never feed a
-// previous result back as initial. Dragging left zooms into X and dragging down
+// previous result back as initial. Dragging right zooms into X and dragging up
 // zooms into Y (screen Y grows downwards). The press anchor keeps the same fractional
 // position in the viewport. Out-of-viewport anchors are clamped to its edge.
 // Enabled axes obey maximum spans; an unselected valid axis remains unchanged.
@@ -103,9 +103,9 @@ inline PlotRange zoom_from_drag(PlotRange initial, ZoomAnchor anchor,
     PlotRange result{valid_range(initial.x, std::min(1.0, max_x)),
                      valid_range(initial.y, std::min(1.0, max_y))};
     if (axes != ZoomAxes::YOnly)
-        result.x = zoom_axis(result.x, anchor.x, total_dx / sensitivity, max_x);
+        result.x = zoom_axis(result.x, anchor.x, -total_dx / sensitivity, max_x);
     if (axes != ZoomAxes::XOnly)
-        result.y = zoom_axis(result.y, anchor.y, -total_dy / sensitivity, max_y);
+        result.y = zoom_axis(result.y, anchor.y, total_dy / sensitivity, max_y);
     return result;
 }
 

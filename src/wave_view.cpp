@@ -28,7 +28,7 @@ constexpr float full_marker_alpha = 0.95f;
 constexpr double hidden_spacing_diameters = 0.75;
 constexpr double resolved_spacing_diameters = 3.0;
 constexpr double auto_y_fill = 0.80;
-constexpr double horizontal_scroll_tail_seconds = 0.12;
+constexpr double drag_zoom_gain = 1.95;
 
 float marker_visibility(double interval, double seconds_per_diameter) {
     const double spacing = interval / seconds_per_diameter;
@@ -241,7 +241,6 @@ struct WaveView::Impl {
     AxisRange paused_x{};
     PlotRange last_limits{};
     double last_drawn_until = infinity, frozen_until = infinity;
-    double last_horizontal_scroll = -infinity;
     double resume_floor = -std::numeric_limits<double>::infinity();
     struct Drag {
         bool held = false, moved = false;
@@ -379,19 +378,14 @@ struct WaveView::Impl {
         return std::nullopt;
     }
 
-    void navigate(PlotRange& range, std::optional<ZoomAxes> hovered) {
+    void navigate(PlotRange& range, std::optional<ZoomAxes> hovered, std::optional<TouchpadDelta> fingers) {
         const auto& io = ImGui::GetIO();
         if (io.AppFocusLost ||
             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
             drag = {};
             pan = {};
-            last_horizontal_scroll = -infinity;
             return;
         }
-        const bool accepts_horizontal = hovered && hovered != ZoomAxes::YOnly;
-        if (!accepts_horizontal || !options.zoom_enabled ||
-            io.MouseDown[ImGuiMouseButton_Left] || io.MouseDown[ImGuiMouseButton_Right])
-            last_horizontal_scroll = -infinity;
         if (hovered == ZoomAxes::Both && options.pause_on_double_click && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             set_paused(!paused);
             return;
@@ -424,8 +418,9 @@ struct WaveView::Impl {
         }
         if (!options.zoom_enabled) { drag = {}; return; }
         const bool start_drag = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
-        const float wheel_x = accepts_horizontal ? io.MouseWheelH : 0.0f;
-        if (!drag.held && !start_drag && (!hovered || (wheel_x == 0 && io.MouseWheel == 0))) return;
+        const bool touchpad = fingers && std::isfinite(fingers->right) && std::isfinite(fingers->up) &&
+            (fingers->right != 0 || fingers->up != 0);
+        if (!drag.held && !start_drag && (!hovered || (!touchpad && io.MouseWheelH == 0 && io.MouseWheel == 0))) return;
         const double fraction = std::clamp(double(io.MousePos.y - plot_pos.y) / std::max(1.0f, plot_size.y), 0.0, 1.0);
         const double x_fraction = std::clamp(double(io.MousePos.x - plot_pos.x) / std::max(1.0f, plot_size.x), 0.0, 1.0);
         const ZoomAnchor anchor{paused ? range.x.min + x_fraction * (range.x.max - range.x.min) : range.x.max,
@@ -455,27 +450,31 @@ struct WaveView::Impl {
             const double threshold = 3 * dpi;
             drag.moved |= dx * dx + dy * dy >= threshold * threshold;
             if (drag.moved)
-                apply(zoom_from_drag(drag.initial, drag.anchor, dx * 1.95, dy * 1.95, drag.axes, drag.limits),
+                apply(zoom_from_drag(drag.initial, drag.anchor, dx * drag_zoom_gain, dy * drag_zoom_gain, drag.axes, drag.limits),
                     drag.axes, dx != 0, dy != 0);
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) drag = {};
         } else {
-            const double now = ImGui::GetTime();
-            if (wheel_x != 0 && std::abs(wheel_x) >= std::abs(io.MouseWheel))
-                last_horizontal_scroll = now;
-            else if (std::abs(io.MouseWheel) >= 1.0f)
-                last_horizontal_scroll = -infinity;
-            // Touchpads can deliver the smaller vertical component a frame later.
-            // Keep that tail from switching Y to manual. A full vertical notch acts immediately.
-            const bool horizontal = now - last_horizontal_scroll < horizontal_scroll_tail_seconds;
-            const double wheel = horizontal ? -wheel_x : io.MouseWheel; // ImGui uses negative X for scroll right.
-            if (wheel == 0) return;
-            const auto axes = horizontal ? ZoomAxes::XOnly : *hovered;
-            const double delta = std::clamp(wheel, -8.0, 8.0) * 35 * dpi;
-            apply(zoom_from_drag(range, anchor, delta, -delta, axes, limits), axes, true, true);
+            const auto axes = *hovered;
+            const double wheel_x = std::clamp(io.MouseWheelH, -8.0f, 8.0f) * 35;
+            const double wheel_y = std::clamp(io.MouseWheel, -8.0f, 8.0f) * 35;
+            // Hosts with only wheel events can supply both components, sometimes on
+            // separate frames. A plain vertical wheel notch keeps its mouse mapping.
+            const bool directional = io.MouseWheelH != 0 ||
+                (!fingers && axes != ZoomAxes::XOnly && std::trunc(io.MouseWheel) != io.MouseWheel);
+            double dx = directional ? -wheel_x : -wheel_y; // ImGui scroll-right is negative.
+            double dy = directional ? -wheel_y : wheel_y;
+            if (touchpad) {
+                dx = fingers->right * drag_zoom_gain;
+                dy = -fingers->up * drag_zoom_gain;
+            }
+            if (axes == ZoomAxes::YOnly) dx = 0;
+            if (axes == ZoomAxes::XOnly) dy = 0;
+            if (dx != 0 || dy != 0)
+                apply(zoom_from_drag(range, anchor, dx * dpi, dy * dpi, axes, limits), axes, dx != 0, dy != 0);
         }
     }
 
-    void draw() {
+    void draw(std::optional<TouchpadDelta> fingers) {
         sync_channels();
         store.update_clocks(ImGui::GetTime());
         const auto live = live_timeline();
@@ -484,7 +483,7 @@ struct WaveView::Impl {
             resume_floor = -infinity;
         PlotRange limits{paused ? paused_x : live_x(live), y};
         const auto hovered = hovered_axes();
-        navigate(limits, hovered);
+        navigate(limits, hovered, fingers);
         limits.x = paused ? paused_x : live_x(live);
         const double left = limits.x.min;
         const double until = std::min(limits.x.max, paused ? frozen_until : display_time(live));
@@ -629,7 +628,8 @@ struct WaveView::Impl {
 WaveView::WaveView(DataStore& store, ViewOptions options) : impl_(std::make_unique<Impl>(store, options)) {}
 WaveView::WaveView(SignalHub& store, ViewOptions options) : impl_(std::make_unique<Impl>(store, options)) {}
 WaveView::~WaveView() = default;
-void WaveView::draw() { impl_->draw(); }
+void WaveView::draw() { impl_->draw(std::nullopt); }
+void WaveView::draw(TouchpadDelta fingers) { impl_->draw(fingers); }
 void WaveView::set_time_span(double seconds) {
     validate_span(seconds);
     impl_->automatic_span = false;
