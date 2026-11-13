@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -26,6 +27,7 @@ constexpr float full_marker_alpha = 0.95f;
 constexpr double hidden_spacing_diameters = 0.75;
 constexpr double resolved_spacing_diameters = 3.0;
 constexpr double auto_y_fill = 0.80;
+constexpr double horizontal_scroll_tail_seconds = 0.12;
 
 float marker_visibility(double interval, double seconds_per_diameter) {
     const double spacing = interval / seconds_per_diameter;
@@ -151,6 +153,7 @@ struct WaveView::Impl {
     AxisRange paused_x{};
     PlotRange last_limits{};
     double last_drawn_until = infinity, frozen_until = infinity;
+    double last_horizontal_scroll = -infinity;
     double resume_floor = -std::numeric_limits<double>::infinity();
     struct Drag {
         bool held = false, moved = false;
@@ -275,30 +278,39 @@ struct WaveView::Impl {
         pan = {};
     }
 
-    void navigate(PlotRange& range) {
-        auto& io = ImGui::GetIO();
+    std::optional<ZoomAxes> hovered_axes() const {
+        const auto pos = ImGui::GetIO().MousePos;
+        if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) ||
+            !contains(pos, frame_pos, frame_size) || contains(pos, legend_pos, legend_size))
+            return std::nullopt;
+        if (contains(pos, plot_pos, plot_size)) return ZoomAxes::Both;
+        if (pos.x >= plot_pos.x && pos.x < plot_pos.x + plot_size.x && pos.y >= plot_pos.y + plot_size.y)
+            return ZoomAxes::XOnly;
+        if (pos.x < plot_pos.x && pos.y >= plot_pos.y && pos.y < plot_pos.y + plot_size.y)
+            return ZoomAxes::YOnly;
+        return std::nullopt;
+    }
+
+    void navigate(PlotRange& range, std::optional<ZoomAxes> hovered) {
+        const auto& io = ImGui::GetIO();
         if (io.AppFocusLost ||
             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
             drag = {};
             pan = {};
+            last_horizontal_scroll = -infinity;
             return;
         }
-        const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
-            contains(io.MousePos, frame_pos, frame_size);
-        const bool legend = contains(io.MousePos, legend_pos, legend_size);
-        const bool plot = hovered && !legend && contains(io.MousePos, plot_pos, plot_size);
-        const bool x_axis = hovered && io.MousePos.x >= plot_pos.x &&
-            io.MousePos.x < plot_pos.x + plot_size.x && io.MousePos.y >= plot_pos.y + plot_size.y;
-        const bool y_axis = hovered && io.MousePos.x < plot_pos.x &&
-            io.MousePos.y >= plot_pos.y && io.MousePos.y < plot_pos.y + plot_size.y;
-        if (plot && options.pause_on_double_click && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        const bool accepts_horizontal = hovered && hovered != ZoomAxes::YOnly;
+        if (!accepts_horizontal || !options.zoom_enabled ||
+            io.MouseDown[ImGuiMouseButton_Left] || io.MouseDown[ImGuiMouseButton_Right])
+            last_horizontal_scroll = -infinity;
+        if (hovered == ZoomAxes::Both && options.pause_on_double_click && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             set_paused(!paused);
             return;
         }
-        if (options.pan_enabled && !drag.held && (plot || x_axis || y_axis) &&
+        if (options.pan_enabled && !drag.held && hovered &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            pan = {true, false, io.MousePos, plot_size, range,
-                x_axis ? ZoomAxes::XOnly : y_axis ? ZoomAxes::YOnly : ZoomAxes::Both};
+            pan = {true, false, io.MousePos, plot_size, range, *hovered};
         }
         if (pan.held) {
             const double dx = io.MousePos.x - pan.press.x, dy = io.MousePos.y - pan.press.y;
@@ -323,9 +335,9 @@ struct WaveView::Impl {
             return;
         }
         if (!options.zoom_enabled) { drag = {}; return; }
-        if (!drag.held && (!(plot || x_axis || y_axis) ||
-            (!ImGui::IsMouseClicked(ImGuiMouseButton_Right) && io.MouseWheel == 0))) return;
-        const auto axes = x_axis ? ZoomAxes::XOnly : y_axis ? ZoomAxes::YOnly : ZoomAxes::Both;
+        const bool start_drag = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+        const float wheel_x = accepts_horizontal ? io.MouseWheelH : 0.0f;
+        if (!drag.held && !start_drag && (!hovered || (wheel_x == 0 && io.MouseWheel == 0))) return;
         const double fraction = std::clamp(double(io.MousePos.y - plot_pos.y) / std::max(1.0f, plot_size.y), 0.0, 1.0);
         const double x_fraction = std::clamp(double(io.MousePos.x - plot_pos.x) / std::max(1.0f, plot_size.x), 0.0, 1.0);
         const ZoomAnchor anchor{paused ? range.x.min + x_fraction * (range.x.max - range.x.min) : range.x.max,
@@ -348,8 +360,8 @@ struct WaveView::Impl {
                 y = range.y = next.y;
             }
         };
-        if ((plot || x_axis || y_axis) && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-            drag = {true, false, io.MousePos, range, anchor, axes, limits};
+        if (start_drag)
+            drag = {true, false, io.MousePos, range, anchor, *hovered, limits};
         if (drag.held) {
             const double dx = io.MousePos.x - drag.press.x, dy = io.MousePos.y - drag.press.y;
             const double threshold = 3 * dpi;
@@ -358,8 +370,19 @@ struct WaveView::Impl {
                 apply(zoom_from_drag(drag.initial, drag.anchor, dx * 1.95, dy * 1.95, drag.axes, drag.limits),
                     drag.axes, dx != 0, dy != 0);
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) drag = {};
-        } else if ((plot || x_axis || y_axis) && io.MouseWheel != 0) {
-            const double delta = std::clamp(double(io.MouseWheel), -8.0, 8.0) * 35 * dpi;
+        } else {
+            const double now = ImGui::GetTime();
+            if (wheel_x != 0 && std::abs(wheel_x) >= std::abs(io.MouseWheel))
+                last_horizontal_scroll = now;
+            else if (std::abs(io.MouseWheel) >= 1.0f)
+                last_horizontal_scroll = -infinity;
+            // Touchpads can deliver the smaller vertical component a frame later.
+            // Keep that tail from switching Y to manual. A full vertical notch acts immediately.
+            const bool horizontal = now - last_horizontal_scroll < horizontal_scroll_tail_seconds;
+            const double wheel = horizontal ? -wheel_x : io.MouseWheel; // ImGui uses negative X for scroll right.
+            if (wheel == 0) return;
+            const auto axes = horizontal ? ZoomAxes::XOnly : *hovered;
+            const double delta = std::clamp(wheel, -8.0, 8.0) * 35 * dpi;
             apply(zoom_from_drag(range, anchor, delta, -delta, axes, limits), axes, true, true);
         }
     }
@@ -372,7 +395,8 @@ struct WaveView::Impl {
         if (live.range.empty || live.range.end < resume_floor || live.playhead >= resume_floor)
             resume_floor = -infinity;
         PlotRange limits{paused ? paused_x : live_x(live), y};
-        navigate(limits);
+        const auto hovered = hovered_axes();
+        navigate(limits, hovered);
         limits.x = paused ? paused_x : live_x(live);
         const double left = limits.x.min;
         const double until = std::min(limits.x.max, paused ? frozen_until : display_time(live));
@@ -389,7 +413,10 @@ struct WaveView::Impl {
             const auto cursor = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton("##plot_input", plot_area,
                 ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-            if (options.zoom_enabled) ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+            if (options.zoom_enabled && hovered) {
+                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+                if (hovered != ZoomAxes::YOnly) ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
+            }
             ImGui::SetCursorScreenPos(cursor);
         }
         constexpr auto flags = ImPlotFlags_NoTitle | ImPlotFlags_NoMenus |

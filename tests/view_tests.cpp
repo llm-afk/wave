@@ -85,8 +85,9 @@ public:
         } else {
         ImGui::SetNextWindowPos({110, 65});
         ImGui::SetNextWindowSize({1000, 650});
+        const auto scroll_flags = scrollable_host ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
         ImGui::Begin("Host", nullptr, ImGuiWindowFlags_NoSavedSettings |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | scroll_flags);
         if (ImGui::Button("Host control")) ++host_clicks;
         button = {ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};
         ImGui::BeginChild("left", {second ? 470.0f : 0.0f, scrollable_host ? 300.0f : 0.0f});
@@ -98,7 +99,7 @@ public:
             second->draw();
             ImGui::EndChild();
         }
-        if (scrollable_host) ImGui::Dummy({0, 1000});
+        if (scrollable_host) ImGui::Dummy({1600, 1000});
         ImGui::End();
         }
         ImGui::Render();
@@ -696,6 +697,80 @@ void wheel_zoom_regions() {
     std::cout << "PASS X/Y/XY wheel regions, anchors, persistent ranges and live following\n";
 }
 
+void horizontal_scroll_zooms_time() {
+    Fixture f;
+    const auto wheel = [&](float x, float y) {
+        ImGui::GetIO().AddMouseWheelEvent(x, y);
+        f.frame();
+    };
+    auto before = f.state();
+    f.move(before.rect.GetCenter());
+    wheel(-.25f, .05f);
+    auto after = f.state();
+    require(near(after.x.Size(), before.x.Size() * std::exp(-.25 * 35 / 180)) &&
+            near(after.x.Max, before.x.Max) && after.y.Min == before.y.Min && after.y.Max == before.y.Max,
+        "Fractional scroll-right over the trace must shorten only the time span and keep the live edge");
+    wheel(0, .05f);
+    require(near(f.state().x.Min, after.x.Min) && f.state().y.Size() == before.y.Size(),
+        "A separate vertical tail from the horizontal gesture must not zoom Y");
+    f.append(20'000, 20'000);
+    f.frame();
+    require(f.state().x.Max > before.x.Max && near(f.state().x.Size(), after.x.Size()),
+        "New data must keep scrolling at the horizontally selected time scale");
+    f.view->set_paused(true);
+    f.frame();
+    before = f.state();
+    f.move({before.rect.Min.x + before.rect.GetWidth() * .28f, before.rect.Max.y + 5});
+    const double fraction = (ImGui::GetIO().MousePos.x - before.rect.Min.x) / before.rect.GetWidth();
+    const double cursor_time = before.x.Min + fraction * before.x.Size();
+    wheel(.5f, 0);
+    after = f.state();
+    require(after.x.Size() > before.x.Size() && near(after.x.Min + fraction * after.x.Size(), cursor_time) &&
+            after.y.Min == before.y.Min && after.y.Max == before.y.Max && f.view->paused(),
+        "Scroll-left over the time axis must expand paused time around the cursor");
+    wheel(-.5f, 0);
+    require(near(f.state().x.Min, before.x.Min) && near(f.state().x.Max, before.x.Max),
+        "Opposite fractional scroll must recover the paused range");
+    const auto unchanged_x = [&] {
+        require(near(f.state().x.Min, before.x.Min) && near(f.state().x.Max, before.x.Max),
+            "Horizontal input must be local to an enabled plot or time axis");
+    };
+    f.move({before.rect.Min.x - 4, before.rect.GetCenter().y});
+    wheel(-1, 0);
+    unchanged_x();
+    f.move(GImPlot->Plots.TryGetMapData(0)->Items.Legend.RectClamped.GetCenter());
+    wheel(-1, 0);
+    unchanged_x();
+    f.view->set_zoom_enabled(false);
+    f.move(before.rect.GetCenter());
+    wheel(-1, 0);
+    unchanged_x();
+    f.view->set_zoom_enabled(true);
+    f.view->set_paused(false);
+    f.view->set_auto_y(true);
+    f.frame();
+    f.move(f.state().rect.GetCenter());
+    wheel(-.25f, .08f);
+    wheel(0, -.05f);
+    f.append(40'000, 20'000, 30);
+    f.frame();
+    require(f.state().y.Max > 29, "Two-finger horizontal zoom must leave automatic Y fitting active");
+    f.view->set_y_range(-40, 40);
+    f.frame();
+    wheel(-.25f, 0);
+    const auto before_notch = f.state();
+    wheel(0, 1);
+    require(f.state().y.Size() < before_notch.y.Size() && f.state().x.Size() < before_notch.x.Size(),
+        "A normal vertical wheel notch after a horizontal swipe must still zoom both axes over the trace");
+    wheel(-.25f, 0);
+    for (int i = 0; i < 12; ++i) f.frame();
+    const auto before_vertical = f.state();
+    wheel(0, .25f);
+    require(f.state().y.Size() < before_vertical.y.Size(),
+        "Independent fractional vertical input must be accepted once the horizontal swipe has ended");
+    std::cout << "PASS horizontal touchpad zoom, fractional input, paused cursor anchor, input scope and automatic Y\n";
+}
+
 void right_drag_zoom_regions() {
     for (int axis = 0; axis < 3; ++axis) {
         Fixture f;
@@ -782,12 +857,22 @@ void wheel_does_not_scroll_the_host() {
     f.frame();
     require(ImGui::FindWindowByName("Host")->Scroll.y == 0,
         "Zooming the plot must not also scroll its containing host window");
+    ImGui::GetIO().AddMouseWheelEvent(-1, 0);
+    f.frame();
+    auto* host = ImGui::FindWindowByName("Host");
+    require(host->ScrollMax.x > 0 && host->Scroll.x == 0,
+        "Horizontal time zoom must not also scroll a horizontally scrollable host");
     f.move({800, 640});
     f.frame();
     ImGui::GetIO().AddMouseWheelEvent(0, -1);
     f.frame();
     require(ImGui::FindWindowByName("Host")->Scroll.y > 0,
         "Wheel outside the plot must remain available to the host scroll region");
+    const double time_span = f.state().x.Size();
+    ImGui::GetIO().AddMouseWheelEvent(-1, 0);
+    f.frame();
+    require(host->Scroll.x > 0 && near(f.state().x.Size(), time_span),
+        "Outside the plot a horizontal gesture must scroll the host and preserve the time span");
     std::cout << "PASS wheel ownership inside a scrolling host\n";
 }
 
@@ -1021,6 +1106,7 @@ int main() {
         extreme_deltas_and_limits();
         zoom_has_no_minimum_scale();
         wheel_zoom_regions();
+        horizontal_scroll_zooms_time();
         right_drag_zoom_regions();
         unsupported_inputs_and_host_override();
         wheel_does_not_scroll_the_host();
