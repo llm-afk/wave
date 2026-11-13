@@ -6,13 +6,13 @@
 
 同进程 C++ 宿主可链接 `Wave::data`，用 `DataStore::configure()` 注册通道，采集线程按批调用 `append()`。等间隔数据按帧交错，例如两通道两帧为 `[A0, B0, A1, B1]`。调用返回后可复用输入内存。使用 ImGui/ImPlot 的宿主再链接 `Wave::view`，在自己的窗口或子区域逐帧调用 `WaveView::draw()`。`WaveView::state()` 可读取用户操作后的范围、暂停和自动 Y 状态。[接入代码和 CMake 用法](../README.md#嵌入上位机)
 
-Windows 上还可使用 `Wave.dll`。导出的 C ABI v1 见 [wave_native.h](../src/wave_native.h)，Python 标准库封装见 [wave_native.py](wave_native.py)。组件创建属于宿主的 `WS_CHILD` 绘图窗口，每个窗口拥有独立的 ImGui/ImPlot 上下文、GPU 资源和显示状态。宿主提供父窗口句柄、位置和渲染定时器，DLL 内每次调用和窗口消息处理结束后恢复之前的 GUI 上下文。C++/Win32 与 Python/Tkinter 两个可运行 Demo 使用同一个 DLL。[ctypes 文档](https://docs.python.org/3/library/ctypes.html) · [Win32 子窗口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowexw)
+Windows 上还可使用 `Wave.dll`。导出的 C ABI v1 见 [wave_native.h](../src/wave_native.h)，Python 标准库封装见 [wave_native.py](../python/wave_native.py)。组件创建属于宿主的 `WS_CHILD` 绘图窗口，每个窗口拥有独立的 ImGui/ImPlot 上下文、GPU 资源和显示状态。宿主提供父窗口句柄、位置和渲染定时器，DLL 内每次调用和窗口消息处理结束后恢复之前的 GUI 上下文。C++/Win32 与 Python/Tkinter 两个可运行 Demo 使用同一个 DLL。[ctypes 文档](https://docs.python.org/3/library/ctypes.html) · [Win32 子窗口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowexw)
 
 DLL 的所有视图使用同一系统单调时钟驱动共享缓存的滚动。直接使用多个 ImGui 上下文的 C++ 宿主可调用 `view.draw(fingers, monotonic_seconds)`，给同一数据会话传入一致的单调时间。单上下文宿主可以继续使用 `draw()`。
 
 ### Windows DLL 与 Python 的最小接入
 
-将 `examples/wave_native.py` 放入宿主可导入的位置，给 `Library(path)` 传入匹配宿主位数的 DLL 路径。
+将 `python/` 加到宿主的模块搜索路径，或将其中的接口模块放入宿主项目。给 `Library(path)` 传入匹配宿主位数的 DLL 路径。
 
 ```python
 from array import array

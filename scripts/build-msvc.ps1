@@ -8,7 +8,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$projectRoot = $PSScriptRoot
+$projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $buildDirectory = Join-Path $projectRoot 'build'
 $objectDirectory = Join-Path $buildDirectory 'obj-msvc'
 $imguiDirectory = Join-Path $projectRoot 'third_party/imgui-1.92.9b-docking'
@@ -150,8 +150,6 @@ try {
     $guiLibraries = @('d3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'shell32.lib', 'advapi32.lib')
     $appObjects = $viewObjects + $backendObjects + @((Build-MsvcObject 'src/main.cpp'))
     Link-MsvcBinary (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects (@('/SUBSYSTEM:WINDOWS', 'ws2_32.lib') + $guiLibraries)
-    Link-MsvcBinary (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
-    Link-MsvcBinary (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
     $nativeImport = Join-Path $buildDirectory 'Wave.lib'
     if (-not (Test-Path -LiteralPath $nativeImport)) { $forceRebuild = $true }
     $nativeObjects = $viewObjects + $backendObjects + @((Build-MsvcObject 'src/wave_native.cpp'))

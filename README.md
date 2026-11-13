@@ -6,17 +6,15 @@ C++20 / Dear ImGui / ImPlot。独立演示程序使用 Windows / DirectX 11。
 
 支持轴区域和绘图区滚轮缩放、右键拖动缩放、左键平移和双击暂停。演示程序显示单一实时波形，绘图组件由宿主安排布局，图例显示名称和颜色。
 
-默认每通道保留 50,000 帧。总计 20 通道、每通道最高 50 kSa/s 是暂定的设计负载。通道、批次和现行 v2 边界见 [组件数据交互边界](examples/PROTOCOL.md#component-data-design)。
+默认每通道保留 50,000 帧。总计 20 通道、每通道最高 50 kSa/s 是暂定的设计负载。通道、批次和现行 v2 边界见 [组件数据交互边界](docs/PROTOCOL.md#component-data-design)。
 
 ## 运行演示程序
 
 双击 `run.cmd`，或运行 `build/WaveDemo.exe`。它只启动一个波形窗口，默认监听本机 TCP 18765，等待外部数据，不生成模拟信号。
 
-单独运行 `run-source.cmd` 可发送真实 CPU/物理内存占用率；数据注册后默认显示所有通道，无需右键选择。两边独立启动、独立退出，数据源在 Wave 未启动时等待并重连。见 [系统数据源](examples/SYSTEM_SOURCE.md)。
-
 第一笔波形从左侧开始，横轴保留原始时间刻度。默认视窗为 10 秒，等间隔数据取 10 秒和“缓存帧数 ÷ 采样率”中的较小值。同图有多个在线来源时，由可见来源中最短的缓存时长决定上限。50,000 帧在 1、10、50 kSa/s 下分别对应 10、5、1 秒的默认视窗。接收时间不等间隔的来源先用 10 秒，缓存满后结合实际首末时间取较小值。视窗填满后，波形末端贴着右边滚动。
 
-Y 轴自动适配当前视窗里所有可见波形。最高点到最低点占绘图区高度的目标为 80%，上下各留 10%。新峰值靠近边缘时立即调整，持续约半秒的范围变化会触发收紧或重新居中，小幅波动保留当前刻度。恒定值居中显示。音频示例见 [音频数据源](examples/AUDIO_SOURCE.md)，通信格式见 [TCP v2](examples/PROTOCOL.md)。
+Y 轴自动适配当前视窗里所有可见波形。最高点到最低点占绘图区高度的目标为 80%，上下各留 10%。新峰值靠近边缘时立即调整，持续约半秒的范围变化会触发收紧或重新居中，小幅波动保留当前刻度。恒定值居中显示。通信格式见 [TCP v2](docs/PROTOCOL.md)。
 
 在绘图区、底部时间轴或左侧幅值轴上，双指滑动和按住鼠标右键拖动都按实际位移连续缩放。向右放大 X，向上放大 Y。向右上移动看细节，向左下移动看全貌。横向走得多，时间尺度就变化得多，纵向同理。纯横移时，自动 Y 继续适配。普通纵向滚轮向上放大 Y，向下缩小 Y，支持横滚的设备可向右滚动放大 X。
 
@@ -28,9 +26,9 @@ Y 轴自动适配当前视窗里所有可见波形。最高点到最低点占绘
 
 ## 嵌入上位机
 
-当前 C++/ImGui 宿主可复用自己的上下文、渲染后端和帧循环，将 `WaveView` 放进窗口的一个子区域。数据池由宿主持有，生命周期长于视图。数据入口、窗口生命周期和交互约定见[组件嵌入与交互说明](examples/EMBEDDING.md)。
+当前 C++/ImGui 宿主可复用自己的上下文、渲染后端和帧循环，将 `WaveView` 放进窗口的一个子区域。数据池由宿主持有，生命周期长于视图。数据入口、窗口生命周期和交互约定见[组件嵌入与交互说明](docs/EMBEDDING.md)。
 
-Windows C++ 或 Python 宿主还可调用 `Wave.dll` 的 C ABI，在自己的窗口中创建原生子控件。使用方式和线程约定见[同进程 DLL 接入](examples/EMBEDDING.md#windows-dll-与-python-的最小接入)。Python 封装仅使用标准库 ctypes，数据可按批提交为连续 float32 数组。
+Windows C++ 或 Python 宿主还可调用 `Wave.dll` 的 C ABI，在自己的窗口中创建原生子控件。使用方式和线程约定见[同进程 DLL 接入](docs/EMBEDDING.md#windows-dll-与-python-的最小接入)。Python 封装位于 `python/`，仅使用标准库 ctypes，数据可按批提交为连续 float32 数组。
 
 两份嵌入 Demo 可直接运行，使用相同 DLL 和后台模拟数据。
 
@@ -104,7 +102,7 @@ target_link_libraries(MyHost PRIVATE Wave::view)
 独立配置时也可显式关闭可执行程序：
 
 ```powershell
-cmake -S . -B build/core-only -DWAVE_BUILD_DEMO=OFF -DWAVE_BUILD_EXAMPLES=OFF -DWAVE_BUILD_NATIVE=OFF -DWAVE_BUILD_HOST_DEMOS=OFF
+cmake -S . -B build/core-only -DWAVE_BUILD_DEMO=OFF -DWAVE_BUILD_NATIVE=OFF -DWAVE_BUILD_HOST_DEMOS=OFF
 cmake --build build/core-only --config Release
 ```
 
@@ -122,7 +120,9 @@ src/wave_protocol.hpp      TCP v2 编解码
 src/wave_native.h/.cpp     DLL 的 C ABI、数据会话和原生视图入口
 src/win32_embedded_view.hpp Windows 子控件、上下文和帧提交
 src/d3d11_surface.hpp      独立程序与子控件共用的 DX11 资源管理
-examples/                  外部数据源、Python 客户端及协议
+examples/                  C++/Win32 与 Python/Tkinter 嵌入 Demo
+python/                    DLL 封装与 TCP v2 客户端
+docs/                      数据协议、嵌入接口与第三方依赖说明
 third_party/               ImGui、ImPlot 源码和 Win32/DX11 后端
 scripts/bootstrap.ps1      准备构建依赖和便携编译器
 build/                     Wave.dll、独立程序、C++ 宿主 Demo 与配套数据源
@@ -138,4 +138,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-默认构建独立程序、两个数据源、`Wave.dll` 和 `CppHostDemo.exe`。Python Demo 使用带 Tkinter 的同位数 Python。也可通过 CMake 使用本机编译器构建，或为 `build-msvc.ps1` 指定 MSVC 和 SDK 路径。`Wave::native` 是 C ABI 导入目标，`Wave::view` 保留 C++/ImGui 的直接接入方式。发布时保留第三方许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+默认构建独立程序、`Wave.dll` 和 `CppHostDemo.exe`。Python Demo 使用带 Tkinter 的同位数 Python。也可通过 CMake 使用本机编译器构建，或为 `scripts/build-msvc.ps1` 指定 MSVC 和 SDK 路径。`Wave::native` 是 C ABI 导入目标，`Wave::view` 保留 C++/ImGui 的直接接入方式。发布时保留第三方许可证，见 [第三方依赖说明](docs/THIRD_PARTY.md)。

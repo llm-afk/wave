@@ -168,7 +168,7 @@ point is not intended as a high-throughput mode.
 
 ## Python example
 
-`examples/wave_client.py` uses only the Python standard library:
+`python/wave_client.py` uses only the Python standard library. Add `python/` to your module search path:
 
 ```python
 from wave_client import WaveClient
@@ -184,9 +184,8 @@ with WaveClient("motor-1", "Motor test") as wave:
     wave.clear_source()          # all history for this source
 ```
 
-The client reports transport and server errors; it does not spawn Wave or silently
-retry uncertain commands. The real system-source executable separately implements
-reconnection and always re-registers before sending.
+The client reports transport and server errors. Reconnect and register again to
+read the next accepted sequence before deciding how to continue submission.
 
 Wire v2 replaces the fixed CPU/memory v1 prototype; old producers must be rebuilt.
 

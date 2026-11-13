@@ -104,8 +104,6 @@ try {
     $guiLibraries = @('-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32', '-ladvapi32')
     $appObjects = $viewObjects + $backendObjects + @((Build-Object 'src/main.cpp'))
     Link-Binary (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects (@('-mwindows', '-lws2_32') + $guiLibraries)
-    Link-Binary (Join-Path $buildDirectory 'SystemSource.exe') @((Build-Object 'examples/system_source.cpp')) @('-lws2_32')
-    Link-Binary (Join-Path $buildDirectory 'AudioSource.exe') @((Build-Object 'examples/audio_source.cpp')) @('-lws2_32', '-lole32', '-luuid')
     $nativeImport = Join-Path $buildDirectory 'libWave.dll.a'
     if (-not (Test-Path -LiteralPath $nativeImport)) { $forceRebuild = $true }
     $nativeObjects = $viewObjects + $backendObjects + @((Build-Object 'src/wave_native.cpp'))

@@ -7,8 +7,11 @@ import math
 from pathlib import Path
 import threading
 import time
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from wave_native import Library
 
 
