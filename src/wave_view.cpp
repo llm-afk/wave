@@ -592,12 +592,6 @@ struct WaveView::Impl {
                     ImGui::GetColorU32(ImGuiCol_TextDisabled), hint);
                 ImPlot::PopPlotClipRect();
             }
-            if (paused) {
-                const char* hint = "已暂停";
-                const auto text = ImGui::CalcTextSize(hint);
-                draw->AddText({pos.x + size.x - text.x - 8, pos.y + 8},
-                    ImGui::GetColorU32(ImGuiCol_TextDisabled), hint);
-            }
             last_limits = limits;
             last_drawn_until = until;
             displayed = true;
