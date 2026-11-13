@@ -21,8 +21,6 @@ struct ZoomAnchor {
     double y{};
 };
 
-enum class ZoomAxes { Both, XOnly, YOnly };
-
 inline constexpr double default_zoom_pixels_per_e_fold = 180;
 
 struct DragZoomLimits {
@@ -53,7 +51,7 @@ inline AxisRange zoom_axis(AxisRange initial, double anchor, double log_scale,
                            double maximum) noexcept {
     initial = valid_range(initial, std::min(1.0, maximum));
     const double original_span = initial.max - initial.min;
-    if (log_scale == 0 && original_span <= maximum)
+    if (log_scale == 0)
         return initial; // A drag returned to its starting position is exact.
 
     if (!std::isfinite(anchor)) anchor = initial.min + original_span * 0.5;
@@ -82,15 +80,11 @@ inline AxisRange zoom_axis(AxisRange initial, double anchor, double log_scale,
 
 } // namespace navigation_detail
 
-// initial and anchor are captured once when the right button goes down.
-// Pass total displacement from that same press on every frame; never feed a
-// previous result back as initial. Dragging right zooms into X and dragging up
-// zooms into Y (screen Y grows downwards). The press anchor keeps the same fractional
-// position in the viewport. Out-of-viewport anchors are clamped to its edge.
-// Enabled axes obey maximum spans; an unselected valid axis remains unchanged.
+// Right and up magnify X and Y independently around the anchor (screen Y grows down).
+// Use total displacement from the press range for a drag, or one frame's displacement
+// from the current range for a touchpad or wheel.
 inline PlotRange zoom_from_drag(PlotRange initial, ZoomAnchor anchor,
                                 double total_dx, double total_dy,
-                                ZoomAxes axes = ZoomAxes::Both,
                                 DragZoomLimits limits = {}) noexcept {
     using namespace navigation_detail;
     const double max_x = positive_span(limits.max_x_span, 3600);
@@ -100,13 +94,8 @@ inline PlotRange zoom_from_drag(PlotRange initial, ZoomAnchor anchor,
     if (std::isnan(total_dx)) total_dx = 0;
     if (std::isnan(total_dy)) total_dy = 0;
 
-    PlotRange result{valid_range(initial.x, std::min(1.0, max_x)),
-                     valid_range(initial.y, std::min(1.0, max_y))};
-    if (axes != ZoomAxes::YOnly)
-        result.x = zoom_axis(result.x, anchor.x, -total_dx / sensitivity, max_x);
-    if (axes != ZoomAxes::XOnly)
-        result.y = zoom_axis(result.y, anchor.y, total_dy / sensitivity, max_y);
-    return result;
+    return {zoom_axis(initial.x, anchor.x, -total_dx / sensitivity, max_x),
+            zoom_axis(initial.y, anchor.y, total_dy / sensitivity, max_y)};
 }
 
 } // namespace wave

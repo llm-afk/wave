@@ -36,9 +36,8 @@ public:
     WaveView& operator=(const WaveView&) = delete;
 
     void draw();
-    // Hosts that distinguish fingers from wheels use this overload every frame,
-    // passing zero when idle, so high-resolution mouse wheels retain their mapping.
-    // Consume its native event so it is not also delivered as mouse-wheel input.
+    // Pass the host's two-finger displacement once per frame. Consume its native
+    // event to avoid duplicate wheel input. A zero delta is equivalent to draw().
     void draw(TouchpadDelta fingers);
     void set_time_span(double seconds);
     void set_y_range(double minimum, double maximum);

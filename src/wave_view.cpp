@@ -247,14 +247,14 @@ struct WaveView::Impl {
         ImVec2 press{};
         PlotRange initial{};
         ZoomAnchor anchor{};
-        ZoomAxes axes = ZoomAxes::Both;
         DragZoomLimits limits{};
     } drag;
+    enum class Region { Plot, TimeAxis, AmplitudeAxis };
     struct Pan {
         bool held = false, moved = false;
         ImVec2 press{}, size{};
         PlotRange initial{};
-        ZoomAxes axes = ZoomAxes::Both;
+        Region region = Region::Plot;
     } pan;
 
     Impl(DataStore& data, ViewOptions config) : owned_store(data), store(owned_store), options(config) {
@@ -365,20 +365,20 @@ struct WaveView::Impl {
         pan = {};
     }
 
-    std::optional<ZoomAxes> hovered_axes() const {
+    std::optional<Region> hovered_region() const {
         const auto pos = ImGui::GetIO().MousePos;
         if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) ||
             !contains(pos, frame_pos, frame_size) || contains(pos, legend_pos, legend_size))
             return std::nullopt;
-        if (contains(pos, plot_pos, plot_size)) return ZoomAxes::Both;
+        if (contains(pos, plot_pos, plot_size)) return Region::Plot;
         if (pos.x >= plot_pos.x && pos.x < plot_pos.x + plot_size.x && pos.y >= plot_pos.y + plot_size.y)
-            return ZoomAxes::XOnly;
+            return Region::TimeAxis;
         if (pos.x < plot_pos.x && pos.y >= plot_pos.y && pos.y < plot_pos.y + plot_size.y)
-            return ZoomAxes::YOnly;
+            return Region::AmplitudeAxis;
         return std::nullopt;
     }
 
-    void navigate(PlotRange& range, std::optional<ZoomAxes> hovered, std::optional<TouchpadDelta> fingers) {
+    void navigate(PlotRange& range, std::optional<Region> hovered, TouchpadDelta fingers) {
         const auto& io = ImGui::GetIO();
         if (io.AppFocusLost ||
             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
@@ -386,7 +386,7 @@ struct WaveView::Impl {
             pan = {};
             return;
         }
-        if (hovered == ZoomAxes::Both && options.pause_on_double_click && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        if (hovered == Region::Plot && options.pause_on_double_click && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             set_paused(!paused);
             return;
         }
@@ -398,7 +398,7 @@ struct WaveView::Impl {
             const double dx = io.MousePos.x - pan.press.x, dy = io.MousePos.y - pan.press.y;
             pan.moved |= dx * dx + dy * dy >= 16 * ImGui::GetStyle().FontScaleDpi * ImGui::GetStyle().FontScaleDpi;
             if (pan.moved) {
-                if (pan.axes != ZoomAxes::XOnly && (dy != 0 || !auto_y)) {
+                if (pan.region != Region::TimeAxis && (dy != 0 || !auto_y)) {
                     const double shift = dy / std::max(1.0f, pan.size.y) * (pan.initial.y.max - pan.initial.y.min);
                     const AxisRange next{pan.initial.y.min + shift, pan.initial.y.max + shift};
                     if (std::isfinite(next.min) && std::isfinite(next.max) && next.min < next.max) {
@@ -406,7 +406,7 @@ struct WaveView::Impl {
                         auto_y = false;
                     }
                 }
-                if (paused && pan.axes != ZoomAxes::YOnly) {
+                if (paused && pan.region != Region::AmplitudeAxis) {
                     const double shift = -dx / std::max(1.0f, pan.size.x) * (pan.initial.x.max - pan.initial.x.min);
                     const AxisRange next{pan.initial.x.min + shift, pan.initial.x.max + shift};
                     if (std::isfinite(next.min) && std::isfinite(next.max) && next.min < next.max)
@@ -418,63 +418,56 @@ struct WaveView::Impl {
         }
         if (!options.zoom_enabled) { drag = {}; return; }
         const bool start_drag = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
-        const bool touchpad = fingers && std::isfinite(fingers->right) && std::isfinite(fingers->up) &&
-            (fingers->right != 0 || fingers->up != 0);
+        const bool touchpad = std::isfinite(fingers.right) && std::isfinite(fingers.up) &&
+            (fingers.right != 0 || fingers.up != 0);
         if (!drag.held && !start_drag && (!hovered || (!touchpad && io.MouseWheelH == 0 && io.MouseWheel == 0))) return;
+        const float dpi = ImGui::GetStyle().FontScaleDpi;
         const double fraction = std::clamp(double(io.MousePos.y - plot_pos.y) / std::max(1.0f, plot_size.y), 0.0, 1.0);
         const double x_fraction = std::clamp(double(io.MousePos.x - plot_pos.x) / std::max(1.0f, plot_size.x), 0.0, 1.0);
         const ZoomAnchor anchor{paused ? range.x.min + x_fraction * (range.x.max - range.x.min) : range.x.max,
             range.y.max - fraction * (range.y.max - range.y.min)};
-        const float dpi = ImGui::GetStyle().FontScaleDpi;
         DragZoomLimits limits;
         // Avoid imposing a new bound on host-provided ranges.
         const auto history = store.range();
         limits.max_x_span = std::max({3600.0, options.time_span, 2 * (history.end - history.begin)});
         limits.max_y_span = std::max(1e12, y.max - y.min);
         limits.pixels_per_e_fold = default_zoom_pixels_per_e_fold * dpi;
-        const auto apply = [&](PlotRange next, ZoomAxes active_axes, bool move_x, bool move_y) {
-            if (active_axes != ZoomAxes::YOnly && (move_x || !automatic_span)) {
-                automatic_span = false;
-                options.time_span = next.x.max - next.x.min;
-                if (paused) paused_x = next.x;
-            }
-            if (active_axes != ZoomAxes::XOnly && (move_y || !auto_y)) {
-                auto_y = false;
-                y = range.y = next.y;
-            }
-        };
         if (start_drag)
-            drag = {true, false, io.MousePos, range, anchor, *hovered, limits};
-        if (drag.held) {
-            const double dx = io.MousePos.x - drag.press.x, dy = io.MousePos.y - drag.press.y;
+            drag = {true, false, io.MousePos, range, anchor, limits};
+        const bool dragging = drag.held;
+        double dx, dy;
+        if (dragging) {
+            dx = io.MousePos.x - drag.press.x;
+            dy = io.MousePos.y - drag.press.y;
             const double threshold = 3 * dpi;
             drag.moved |= dx * dx + dy * dy >= threshold * threshold;
-            if (drag.moved)
-                apply(zoom_from_drag(drag.initial, drag.anchor, dx * drag_zoom_gain, dy * drag_zoom_gain, drag.axes, drag.limits),
-                    drag.axes, dx != 0, dy != 0);
-            if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) drag = {};
+            drag.held = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+            if (!drag.moved) return;
+            dx *= drag_zoom_gain;
+            dy *= drag_zoom_gain;
+        } else if (touchpad) {
+            dx = fingers.right * dpi * drag_zoom_gain;
+            dy = -fingers.up * dpi * drag_zoom_gain;
         } else {
-            const auto axes = *hovered;
-            const double wheel_x = std::clamp(io.MouseWheelH, -8.0f, 8.0f) * 35;
-            const double wheel_y = std::clamp(io.MouseWheel, -8.0f, 8.0f) * 35;
-            // Hosts with only wheel events can supply both components, sometimes on
-            // separate frames. A plain vertical wheel notch keeps its mouse mapping.
-            const bool directional = io.MouseWheelH != 0 ||
-                (!fingers && axes != ZoomAxes::XOnly && std::trunc(io.MouseWheel) != io.MouseWheel);
-            double dx = directional ? -wheel_x : -wheel_y; // ImGui scroll-right is negative.
-            double dy = directional ? -wheel_y : wheel_y;
-            if (touchpad) {
-                dx = fingers->right * drag_zoom_gain;
-                dy = -fingers->up * drag_zoom_gain;
-            }
-            if (axes == ZoomAxes::YOnly) dx = 0;
-            if (axes == ZoomAxes::XOnly) dy = 0;
-            if (dx != 0 || dy != 0)
-                apply(zoom_from_drag(range, anchor, dx * dpi, dy * dpi, axes, limits), axes, dx != 0, dy != 0);
+            // ImGui wheel units use negative X for right and positive Y for up.
+            dx = -std::clamp(io.MouseWheelH, -8.0f, 8.0f) * 35.0 * dpi;
+            dy = -std::clamp(io.MouseWheel, -8.0f, 8.0f) * 35.0 * dpi;
+        }
+        const auto next = zoom_from_drag(dragging ? drag.initial : range, dragging ? drag.anchor : anchor,
+                                         dx, dy, dragging ? drag.limits : limits);
+        // A held drag uses its press range, including when one component returns to zero.
+        if (dx != 0 || (dragging && !automatic_span)) {
+            automatic_span = false;
+            options.time_span = next.x.max - next.x.min;
+            if (paused) paused_x = next.x;
+        }
+        if (dy != 0 || (dragging && !auto_y)) {
+            auto_y = false;
+            y = range.y = next.y;
         }
     }
 
-    void draw(std::optional<TouchpadDelta> fingers) {
+    void draw(TouchpadDelta fingers) {
         sync_channels();
         store.update_clocks(ImGui::GetTime());
         const auto live = live_timeline();
@@ -482,7 +475,7 @@ struct WaveView::Impl {
         if (live.range.empty || live.range.end < resume_floor || live.playhead >= resume_floor)
             resume_floor = -infinity;
         PlotRange limits{paused ? paused_x : live_x(live), y};
-        const auto hovered = hovered_axes();
+        const auto hovered = hovered_region();
         navigate(limits, hovered, fingers);
         limits.x = paused ? paused_x : live_x(live);
         const double left = limits.x.min;
@@ -502,7 +495,7 @@ struct WaveView::Impl {
                 ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
             if (options.zoom_enabled && hovered) {
                 ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-                if (hovered != ZoomAxes::YOnly) ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
+                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
             }
             ImGui::SetCursorScreenPos(cursor);
         }
@@ -628,7 +621,7 @@ struct WaveView::Impl {
 WaveView::WaveView(DataStore& store, ViewOptions options) : impl_(std::make_unique<Impl>(store, options)) {}
 WaveView::WaveView(SignalHub& store, ViewOptions options) : impl_(std::make_unique<Impl>(store, options)) {}
 WaveView::~WaveView() = default;
-void WaveView::draw() { impl_->draw(std::nullopt); }
+void WaveView::draw() { draw({}); }
 void WaveView::draw(TouchpadDelta fingers) { impl_->draw(fingers); }
 void WaveView::set_time_span(double seconds) {
     validate_span(seconds);

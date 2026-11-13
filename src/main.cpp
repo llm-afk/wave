@@ -170,7 +170,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     wave::apply_style(current_dpi_scale);
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(device, device_context);
-    const bool native_touchpad = touchpad.enable(window);
+    touchpad.enable(window);
 
     wave::SignalHub data;
     wave::WaveView view(data);
@@ -236,8 +236,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
         if (ImGui::Begin("Wave", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-            if (native_touchpad) view.draw(fingers);
-            else view.draw();
+            view.draw(fingers);
         }
         ImGui::End();
         ImGui::PopStyleVar();
