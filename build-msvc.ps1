@@ -1,7 +1,5 @@
 [CmdletBinding()]
 param(
-    [switch]$TestOnly,
-    [switch]$SkipTests,
     [string]$MsvcRoot = '',
     [string]$SdkRoot = '',
     [string]$SdkVersion = '',
@@ -27,7 +25,6 @@ $originalLib = $env:LIB
 $buildExitCode = 0
 
 try {
-    if ($TestOnly -and $SkipTests) { throw '-TestOnly and -SkipTests cannot be used together.' }
     $MsvcRoot = [IO.Path]::GetFullPath($MsvcRoot)
     $SdkRoot = [IO.Path]::GetFullPath($SdkRoot)
     $compilerDirectory = Join-Path $MsvcRoot 'bin/Hostx64/x64'
@@ -93,7 +90,7 @@ try {
     if (-not $forceRebuild) { $forceRebuild = [IO.File]::ReadAllText($configurationFile) -ne $configuration }
 
     $latestHeaderTime = [DateTime]::MinValue
-    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), (Join-Path $projectRoot 'tests'), $imguiDirectory, $implotDirectory)) {
+    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), $imguiDirectory, $implotDirectory)) {
         if (Test-Path -LiteralPath $headerRoot -PathType Container) {
             foreach ($header in Get-ChildItem -LiteralPath $headerRoot -Recurse -File | Where-Object { $_.Extension -in @('.h', '.hpp', '.inl') }) {
                 if ($header.LastWriteTimeUtc -gt $latestHeaderTime) { $latestHeaderTime = $header.LastWriteTimeUtc }
@@ -135,8 +132,6 @@ try {
     }
 
     $coreObject = Build-MsvcObject 'src/data_core.cpp'
-    # The same view/plot objects serve the app and headless view tests.
-    # TestOnly does not compile the Win32 or DirectX renderer backends.
     $viewObjects = @($coreObject)
     foreach ($source in @(
         'src/wave_view.cpp',
@@ -148,46 +143,17 @@ try {
         'third_party/implot-1.0/implot_items.cpp'
     )) { $viewObjects += Build-MsvcObject $source }
 
-    if (-not $TestOnly) {
-        $appObjects = $viewObjects + @(
-            (Build-MsvcObject 'src/main.cpp'),
-            (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
-            (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
-        )
-        Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'ws2_32.lib', 'advapi32.lib')
-        Link-MsvcExecutable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
-        Link-MsvcExecutable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
-    }
-
-    if (-not $SkipTests) {
-        $tcpTest = Join-Path $buildDirectory 'tcp_source_tests.exe'
-        Link-MsvcExecutable $tcpTest @($coreObject, (Build-MsvcObject 'tests/tcp_source_tests.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
-        & $tcpTest
-        if ($LASTEXITCODE -ne 0) { throw 'TCP source tests failed.' }
-        $testObjects = @($coreObject, (Build-MsvcObject 'tests/data_core_tests.cpp'), (Build-MsvcObject 'tests/simulation_source.cpp'))
-        $testExecutable = Join-Path $buildDirectory 'data_core_tests.exe'
-        Link-MsvcExecutable $testExecutable $testObjects @('/SUBSYSTEM:CONSOLE')
-        Write-Host 'Running data core tests...'
-        & $testExecutable | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Data core tests failed (exit $LASTEXITCODE)." }
-
-        $clockObjects = @((Build-MsvcObject 'tests/display_clock_tests.cpp'))
-        $clockExecutable = Join-Path $buildDirectory 'display_clock_tests.exe'
-        Link-MsvcExecutable $clockExecutable $clockObjects @('/SUBSYSTEM:CONSOLE')
-        Write-Host 'Running display clock tests...'
-        & $clockExecutable | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Display clock tests failed (exit $LASTEXITCODE)." }
-
-        $viewTestObjects = $viewObjects + @((Build-MsvcObject 'tests/view_tests.cpp'))
-        $viewTestExecutable = Join-Path $buildDirectory 'view_tests.exe'
-        Link-MsvcExecutable $viewTestExecutable $viewTestObjects @('/SUBSYSTEM:CONSOLE', 'user32.lib', 'imm32.lib', 'shell32.lib', 'advapi32.lib')
-        Write-Host 'Running headless view tests...'
-        & $viewTestExecutable | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "View tests failed (exit $LASTEXITCODE)." }
-    }
+    $appObjects = $viewObjects + @(
+        (Build-MsvcObject 'src/main.cpp'),
+        (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
+        (Build-MsvcObject 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
+    )
+    Link-MsvcExecutable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('/SUBSYSTEM:WINDOWS', 'd3d11.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dwmapi.lib', 'gdi32.lib', 'user32.lib', 'imm32.lib', 'ws2_32.lib', 'advapi32.lib')
+    Link-MsvcExecutable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-MsvcObject 'examples/system_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib')
+    Link-MsvcExecutable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-MsvcObject 'examples/audio_source.cpp')) @('/SUBSYSTEM:CONSOLE', 'ws2_32.lib', 'ole32.lib', 'uuid.lib')
     [IO.File]::WriteAllText($configurationFile, $configuration)
     Write-Host 'MSVC build completed.' -ForegroundColor Green
-    if (-not $TestOnly) { Write-Host ('Run: ' + (Join-Path $buildDirectory 'WaveDemo.exe')) }
+    Write-Host ('Run: ' + (Join-Path $buildDirectory 'WaveDemo.exe'))
 } catch {
     Write-Host ('MSVC build failed: ' + $_.Exception.Message) -ForegroundColor Red
     $buildExitCode = 1

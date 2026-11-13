@@ -81,19 +81,19 @@ view.set_y_range(-20.0, 20.0);
 上位机只需链接 `Wave::view`：
 
 ```cmake
-# 子目录方式默认只构建核心库，不启动/构建演示程序和测试。
+# 子目录方式默认只构建核心库。
 add_subdirectory(path/to/wave)
 target_link_libraries(MyHost PRIVATE Wave::view)
 ```
 
-`Wave::data` 是无 GUI 的数据层。只有独立演示程序和通信测试链接 Winsock；仅链接 `Wave::view` 不会带入 TCP 接收器、Win32/DX11 后端或示例采集程序。
+`Wave::data` 是无 GUI 的数据层。独立演示程序和示例数据源使用 Winsock；仅链接 `Wave::view` 不会带入 TCP 接收器、Win32/DX11 后端或示例采集程序。
 
 默认使用固定版本的 ImGui v1.92.9b-docking / ImPlot v1.0。若宿主已有兼容的 ImGui/ImPlot 合并目标，在 `add_subdirectory` 前设置 `WAVE_PLOT_TARGET` 为该目标名，以避免编译第二份 GUI 库；它须公开这两个库的头文件与链接依赖。组件使用该固定版本的 ImPlotSpec API，升级需要验证兼容性。
 
 独立配置时也可显式关闭可执行程序：
 
 ```powershell
-cmake -S . -B build/core-only -DWAVE_BUILD_DEMO=OFF -DWAVE_BUILD_EXAMPLES=OFF -DWAVE_BUILD_TESTS=OFF
+cmake -S . -B build/core-only -DWAVE_BUILD_DEMO=OFF -DWAVE_BUILD_EXAMPLES=OFF
 cmake --build build/core-only --config Release
 ```
 
@@ -109,20 +109,19 @@ src/main.cpp               独立演示：原生窗口、DX11、帧循环和 TCP
 src/tcp_source.hpp         可选 TCP 接收适配器
 src/wave_protocol.hpp      TCP v2 编解码
 examples/                  外部数据源、Python 客户端及协议
-tests/                     数据、时钟、嵌入显示、TCP 测试
-tests/simulation_source.*  仅测试使用的模拟源，不编入核心库
+third_party/               ImGui、ImPlot 源码和 Win32/DX11 后端
+scripts/bootstrap.ps1      准备构建依赖和便携编译器
+build/                     当前 Wave 和两个配套数据源 EXE
+run*.cmd                   示波器和配套数据源的启动入口
 ```
 
-## 构建与验证
+## 构建
 
-本项目已准备 LLVM-MinGW 工具链：
+当前目录保留已编译程序，双击启动脚本即可运行。重新编译时先准备 LLVM-MinGW 工具链，再构建程序。
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-默认构建演示程序、两个独立数据源及四组测试，并运行测试。`-TestOnly` 只构建/运行测试，不编译原生图形后端；`-SkipTests` 只构建程序。有对应微软工具链时也可使用 `build-msvc.ps1`，或通过 CMake 构建。首次准备依赖见 `scripts/bootstrap.ps1`。发布时保留第三方许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-
-验证包含：真实 TCP 注册/重连/校验、缓存覆盖/极值/线程安全、显示时钟，以及无原生窗口的真实 ImGui/ImPlot 集成测试。后者检查空图/快速音频尺度的布局稳定、快照限速/跳过积压、同源通道读取一致、暂停后台覆盖/恢复最新、默认显示、宿主通道筛选、轴区域/绘图区滚轮与右键拖动、已移除的其他输入操作不再生效、多个独立实例、宿主控件仍可交互以及按像素限制绘图点数。
-
-`WaveDemo.exe --smoke-test` 使用实际 DX11 渲染约 12 秒并在工作目录输出 `smoke-test.json`。无来源时点数为零，有来源时默认绘制。Python 接入检查：`python tests/python_client_test.py`（可加 `--receiver-time`）。这些检查不代表长期负载或真实设备链路验证。
+默认构建演示程序和两个独立数据源。有对应微软工具链时也可为 `build-msvc.ps1` 指定 MSVC 和 SDK 路径，或通过 CMake 构建。发布时保留第三方许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。

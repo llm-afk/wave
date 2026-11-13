@@ -13,11 +13,10 @@ system-wide software is installed.
 | Microsoft C++ Build Tools (local build alternative) | MSVC toolset 14.44.35207, compiler 19.44.35229 | https://visualstudio.microsoft.com/visual-cpp-build-tools/ | Microsoft license terms apply; build tool only, not included in the application. |
 | Windows SDK (local build alternative) | 10.0.26100.0 | https://developer.microsoft.com/windows/downloads/windows-sdk/ | Microsoft SDK license terms apply; build headers and libraries only. |
 
-`build-msvc.ps1` uses the Microsoft compiler and SDK packages already prepared
-inside `.tools` on this machine. It also accepts explicit MSVC and SDK paths.
+`build-msvc.ps1` accepts explicit MSVC and Windows SDK paths for an existing
+installation.
 `scripts/bootstrap.ps1` downloads the MinGW alternative; it does not provision
-MSVC or the Windows SDK. Windows application-control policy can reject the
-unsigned MinGW tools on some machines; the working local build uses MSVC.
+MSVC or the Windows SDK. The supplied executables were built with LLVM MinGW.
 
 The build scripts statically link the selected C++ runtime (`/MT` for MSVC or
 `-static` for MinGW) and use Windows system DLLs for Win32 and DirectX 11. The

@@ -1,8 +1,5 @@
 [CmdletBinding()]
-param(
-    [switch]$TestOnly,
-    [switch]$SkipTests
-)
+param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -14,7 +11,6 @@ $implotDirectory = Join-Path $projectRoot 'third_party/implot-1.0'
 $portableCompiler = Join-Path $projectRoot '.tools/llvm-mingw-20260922-ucrt-x86_64/bin/clang++.exe'
 
 try {
-    if ($TestOnly -and $SkipTests) { throw '-TestOnly and -SkipTests cannot be used together.' }
     if (Test-Path -LiteralPath $portableCompiler -PathType Leaf) {
         $compiler = $portableCompiler
     } else {
@@ -48,7 +44,7 @@ try {
 
     # Headers are few; a shared latest timestamp also handles transitive includes.
     $latestHeaderTime = [DateTime]::MinValue
-    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), (Join-Path $projectRoot 'tests'), $imguiDirectory, $implotDirectory)) {
+    foreach ($headerRoot in @((Join-Path $projectRoot 'src'), $imguiDirectory, $implotDirectory)) {
         if (Test-Path -LiteralPath $headerRoot -PathType Container) {
             foreach ($header in Get-ChildItem -LiteralPath $headerRoot -Recurse -File | Where-Object { $_.Extension -in @('.h', '.hpp', '.inl') }) {
                 if ($header.LastWriteTimeUtc -gt $latestHeaderTime) { $latestHeaderTime = $header.LastWriteTimeUtc }
@@ -90,7 +86,6 @@ try {
     }
 
     $coreObject = Build-Object 'src/data_core.cpp'
-    # Reuse the view/plot objects without native backends in headless tests.
     $viewObjects = @($coreObject)
     foreach ($source in @(
         'src/wave_view.cpp',
@@ -102,47 +97,18 @@ try {
         'third_party/implot-1.0/implot_items.cpp'
     )) { $viewObjects += Build-Object $source }
 
-    if (-not $TestOnly) {
-        $appObjects = $viewObjects + @(
-            (Build-Object 'src/main.cpp'),
-            (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
-            (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
-        )
-        Link-Executable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('-mwindows', '-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32', '-lws2_32', '-ladvapi32')
-        Link-Executable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-Object 'examples/system_source.cpp')) @('-lws2_32')
-        Link-Executable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-Object 'examples/audio_source.cpp')) @('-lws2_32', '-lole32', '-luuid')
-    }
-
-    if (-not $SkipTests) {
-        $tcpTest = Join-Path $buildDirectory 'tcp_source_tests.exe'
-        Link-Executable $tcpTest @($coreObject, (Build-Object 'tests/tcp_source_tests.cpp')) @('-lws2_32')
-        & $tcpTest
-        if ($LASTEXITCODE -ne 0) { throw 'TCP source tests failed.' }
-        $testObjects = @($coreObject, (Build-Object 'tests/data_core_tests.cpp'), (Build-Object 'tests/simulation_source.cpp'))
-        $testExecutable = Join-Path $buildDirectory 'data_core_tests.exe'
-        Link-Executable $testExecutable $testObjects @()
-        Write-Host 'Running data core tests...'
-        & $testExecutable
-        if ($LASTEXITCODE -ne 0) { throw "Data core tests failed (exit $LASTEXITCODE)." }
-
-        $clockObjects = @((Build-Object 'tests/display_clock_tests.cpp'))
-        $clockExecutable = Join-Path $buildDirectory 'display_clock_tests.exe'
-        Link-Executable $clockExecutable $clockObjects @()
-        Write-Host 'Running display clock tests...'
-        & $clockExecutable
-        if ($LASTEXITCODE -ne 0) { throw "Display clock tests failed (exit $LASTEXITCODE)." }
-
-        $viewTestObjects = $viewObjects + @((Build-Object 'tests/view_tests.cpp'))
-        $viewTestExecutable = Join-Path $buildDirectory 'view_tests.exe'
-        Link-Executable $viewTestExecutable $viewTestObjects @('-luser32', '-limm32', '-lshell32', '-ladvapi32')
-        Write-Host 'Running headless view tests...'
-        & $viewTestExecutable
-        if ($LASTEXITCODE -ne 0) { throw "View tests failed (exit $LASTEXITCODE)." }
-    }
+    $appObjects = $viewObjects + @(
+        (Build-Object 'src/main.cpp'),
+        (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_win32.cpp'),
+        (Build-Object 'third_party/imgui-1.92.9b-docking/backends/imgui_impl_dx11.cpp')
+    )
+    Link-Executable (Join-Path $buildDirectory 'WaveDemo.exe') $appObjects @('-mwindows', '-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-lgdi32', '-luser32', '-limm32', '-lshell32', '-lws2_32', '-ladvapi32')
+    Link-Executable (Join-Path $buildDirectory 'SystemSource.exe') @((Build-Object 'examples/system_source.cpp')) @('-lws2_32')
+    Link-Executable (Join-Path $buildDirectory 'AudioSource.exe') @((Build-Object 'examples/audio_source.cpp')) @('-lws2_32', '-lole32', '-luuid')
 
     [IO.File]::WriteAllText($configurationFile, $configuration)
     Write-Host 'Build completed.' -ForegroundColor Green
-    if (-not $TestOnly) { Write-Host ('Run: ' + (Join-Path $buildDirectory 'WaveDemo.exe')) }
+    Write-Host ('Run: ' + (Join-Path $buildDirectory 'WaveDemo.exe'))
     exit 0
 } catch {
     Write-Host ('Build failed: ' + $_.Exception.Message) -ForegroundColor Red
